@@ -564,17 +564,12 @@ EXPORT_SYMBOL(skb_copy_datagram_from_iter);
  *
  *	Returns 0, -EFAULT or -EMSGSIZE.
  */
-int zerocopy_sg_from_iter(struct sk_buff *skb, struct iov_iter *from)
+int __zerocopy_sg_from_iter(struct sock *sk, struct sk_buff *skb,
+			    struct iov_iter *from, size_t length)
 {
-	int len = iov_iter_count(from);
-	int copy = min_t(int, skb_headlen(skb), len);
-	int frag = 0;
+	int frag = skb_shinfo(skb)->nr_frags;
 
-	/* copy up to skb headlen */
-	if (skb_copy_datagram_from_iter(skb, 0, from, copy))
-		return -EFAULT;
-
-	while (iov_iter_count(from)) {
+	while (length && iov_iter_count(from)) {
 		struct page *pages[MAX_SKB_FRAGS];
 		size_t start;
 		ssize_t copied;
@@ -584,18 +579,24 @@ int zerocopy_sg_from_iter(struct sk_buff *skb, struct iov_iter *from)
 		if (frag == MAX_SKB_FRAGS)
 			return -EMSGSIZE;
 
-		copied = iov_iter_get_pages(from, pages, ~0U,
+		copied = iov_iter_get_pages(from, pages, length,
 					    MAX_SKB_FRAGS - frag, &start);
 		if (copied < 0)
 			return -EFAULT;
 
 		iov_iter_advance(from, copied);
+		length -= copied;
 
 		truesize = PAGE_ALIGN(copied + start);
 		skb->data_len += copied;
 		skb->len += copied;
 		skb->truesize += truesize;
-		atomic_add(truesize, &skb->sk->sk_wmem_alloc);
+		if (sk && sk->sk_type == SOCK_STREAM) {
+			sk->sk_wmem_queued += truesize;
+			sk_mem_charge(sk, truesize);
+		} else {
+			atomic_add(truesize, &skb->sk->sk_wmem_alloc);
+		}
 		while (copied) {
 			int size = min_t(int, copied, PAGE_SIZE - start);
 			skb_fill_page_desc(skb, frag++, pages[n], start, size);
@@ -605,6 +606,18 @@ int zerocopy_sg_from_iter(struct sk_buff *skb, struct iov_iter *from)
 		}
 	}
 	return 0;
+}
+EXPORT_SYMBOL(__zerocopy_sg_from_iter);
+
+int zerocopy_sg_from_iter(struct sk_buff *skb, struct iov_iter *from)
+{
+	int copy = min_t(int, skb_headlen(skb), iov_iter_count(from));
+
+	/* copy up to skb headlen */
+	if (skb_copy_datagram_from_iter(skb, 0, from, copy))
+		return -EFAULT;
+
+	return __zerocopy_sg_from_iter(NULL, skb, from, ~0U);
 }
 EXPORT_SYMBOL(zerocopy_sg_from_iter);
 
