@@ -936,6 +936,126 @@ struct sk_buff *skb_morph(struct sk_buff *dst, struct sk_buff *src)
 }
 EXPORT_SYMBOL_GPL(skb_morph);
 
+/* must only be called from process context */
+struct ubuf_info *sock_zerocopy_alloc(struct sock *sk, size_t size)
+{
+	struct sk_buff *skb;
+	struct ubuf_info *uarg;
+
+	skb = sock_omalloc(sk, 0, GFP_KERNEL);
+	if (!skb)
+		return NULL;
+
+	BUILD_BUG_ON(sizeof(*uarg) > sizeof(skb->cb));
+	uarg = (void *)skb->cb;
+
+	uarg->callback = sock_zerocopy_callback;
+	uarg->desc = atomic_inc_return(&sk->sk_zckey) - 1;
+	atomic_set(&uarg->refcnt, 0);
+	sock_hold(sk);
+
+	return uarg;
+}
+EXPORT_SYMBOL_GPL(sock_zerocopy_alloc);
+
+static inline struct sk_buff *skb_from_uarg(struct ubuf_info *uarg)
+{
+	return container_of((void *)uarg, struct sk_buff, cb);
+}
+
+void sock_zerocopy_callback(struct ubuf_info *uarg, bool success)
+{
+	struct sock_exterr_skb *serr;
+	struct sk_buff *skb = skb_from_uarg(uarg);
+	struct sock *sk = skb->sk;
+	u16 id = uarg->desc;
+
+	serr = SKB_EXT_ERR(skb);
+	memset(serr, 0, sizeof(*serr));
+	serr->ee.ee_errno = 0;
+	serr->ee.ee_origin = SO_EE_ORIGIN_ZEROCOPY;
+	serr->ee.ee_data = id;
+
+	skb_queue_tail(&sk->sk_error_queue, skb);
+
+	if (!sock_flag(sk, SOCK_DEAD))
+		sk->sk_error_report(sk);
+
+	sock_put(sk);
+}
+EXPORT_SYMBOL_GPL(sock_zerocopy_callback);
+
+void sock_zerocopy_put(struct ubuf_info *uarg)
+{
+	if (uarg && atomic_dec_and_test(&uarg->refcnt)) {
+		if (uarg->callback)
+			uarg->callback(uarg, true);
+		else
+			consume_skb(skb_from_uarg(uarg));
+	}
+}
+EXPORT_SYMBOL_GPL(sock_zerocopy_put);
+
+bool skb_zerocopy_alloc(struct sk_buff *skb, size_t size)
+{
+	struct ubuf_info *uarg;
+
+	uarg = sock_zerocopy_alloc(skb->sk, size);
+	if (!uarg)
+		return false;
+
+	skb_zcopy_set(skb, uarg);
+	return true;
+}
+EXPORT_SYMBOL_GPL(skb_zerocopy_alloc);
+
+extern int __zerocopy_sg_from_iter(struct sock *sk, struct sk_buff *skb,
+				   struct iov_iter *from, size_t length);
+
+int skb_zerocopy_add_frags_iter(struct sock *sk, struct sk_buff *skb,
+				struct iov_iter *iter, int len,
+				struct ubuf_info *uarg)
+{
+	struct ubuf_info *orig_uarg = skb_zcopy(skb);
+	struct iov_iter orig_iter = *iter;
+	int ret, orig_len = skb->len;
+
+	if (orig_uarg && orig_uarg != uarg)
+		return -EEXIST;
+
+	ret = __zerocopy_sg_from_iter(sk, skb, iter, len);
+	if (ret && (ret != -EMSGSIZE || skb->len == orig_len)) {
+		*iter = orig_iter;
+		___pskb_trim(skb, orig_len);
+		return ret;
+	}
+
+	if (!orig_uarg)
+		skb_zcopy_set(skb, uarg);
+
+	return skb->len - orig_len;
+}
+EXPORT_SYMBOL_GPL(skb_zerocopy_add_frags_iter);
+
+/* unused only until next patch in the series; will remove attribute */
+static int __attribute__((unused))
+	   skb_zerocopy_clone(struct sk_buff *nskb, struct sk_buff *orig,
+			      gfp_t gfp_mask)
+{
+	if (skb_zcopy(orig)) {
+		if (skb_zcopy(nskb)) {
+			/* !gfp_mask callers are verified to !skb_zcopy(nskb) */
+			BUG_ON(!gfp_mask);
+			if (skb_uarg(nskb) == skb_uarg(orig))
+				return 0;
+			if (skb_copy_ubufs(nskb, GFP_ATOMIC))
+				return -EIO;
+		}
+		skb_zcopy_set(nskb, skb_uarg(orig));
+	}
+	return 0;
+}
+
 /**
  *	skb_copy_ubufs	-	copy userspace skb frags buffers to kernel
  *	@skb: the skb to modify
