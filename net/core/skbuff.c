@@ -948,6 +948,9 @@ EXPORT_SYMBOL_GPL(skb_morph);
  *	If this function is called from an interrupt gfp_mask() must be
  *	%GFP_ATOMIC.
  *
+ *	skb_shinfo(skb) can only be safely modified when not accessed
+ *	concurrently. Fail if the skb is shared or cloned.
+ *
  *	Returns 0 on success or a negative error code on failure
  *	to allocate kernel memory to copy to.
  */
@@ -958,11 +961,29 @@ int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask)
 	struct page *page, *head = NULL;
 	struct ubuf_info *uarg = skb_shinfo(skb)->destructor_arg;
 
+	if (skb_shared(skb) || skb_cloned(skb)) {
+		WARN_ON_ONCE(1);
+		return -EINVAL;
+	}
+
 	for (i = 0; i < num_frags; i++) {
 		u8 *vaddr;
+		unsigned int order = 0;
+		gfp_t mask = gfp_mask;
 		skb_frag_t *f = &skb_shinfo(skb)->frags[i];
 
-		page = alloc_page(gfp_mask);
+		page = skb_frag_page(f);
+		if (page_count(page) == 1) {
+			skb_frag_ref(skb, i);
+			goto copy_done;
+		}
+
+		if (f->size > PAGE_SIZE) {
+			order = get_order(f->size);
+			mask |= __GFP_COMP;
+		}
+
+		page = alloc_pages(mask, order);
 		if (!page) {
 			while (head) {
 				struct page *next = (struct page *)page_private(head);
@@ -975,6 +996,7 @@ int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask)
 		memcpy(page_address(page),
 		       vaddr + f->page_offset, skb_frag_size(f));
 		kunmap_atomic(vaddr);
+copy_done:
 		set_page_private(page, (unsigned long)head);
 		head = page;
 	}
