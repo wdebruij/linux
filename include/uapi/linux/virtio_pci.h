@@ -155,6 +155,8 @@ struct virtio_pci_common_cfg {
 	__le32 queue_avail_hi;		/* read-write */
 	__le32 queue_used_lo;		/* read-write */
 	__le32 queue_used_hi;		/* read-write */
+	__le32 queue_coalesce_count;    /* read-write */
+	__le32 queue_coalesce_us;       /* read-write */
 };
 
 /* Fields in VIRTIO_PCI_CAP_PCI_CFG: */
@@ -193,6 +195,8 @@ struct virtio_pci_cfg_cap {
 #define VIRTIO_PCI_COMMON_Q_AVAILHI	44
 #define VIRTIO_PCI_COMMON_Q_USEDLO	48
 #define VIRTIO_PCI_COMMON_Q_USEDHI	52
+#define VIRTIO_PCI_COMMON_Q_COALESCE_C  56
+#define VIRTIO_PCI_COMMON_Q_COALESCE_U  60
 
 #endif /* VIRTIO_PCI_NO_MODERN */
 
