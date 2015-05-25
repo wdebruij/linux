@@ -267,6 +267,16 @@ static void vp_set_status(struct virtio_device *vdev, u8 status)
 	vp_iowrite8(status, &vp_dev->common->device_status);
 }
 
+static void vp_set_coalesce(struct virtio_device *vdev, int n,
+			    u32 coalesce_count, u32 coalesce_us)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+
+	iowrite16(n, &vp_dev->common->queue_select);
+	iowrite32(coalesce_count, &vp_dev->common->queue_coalesce_count);
+	iowrite32(coalesce_us, &vp_dev->common->queue_coalesce_us);
+}
+
 static void vp_reset(struct virtio_device *vdev)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
@@ -450,6 +460,7 @@ static const struct virtio_config_ops virtio_pci_config_ops = {
 	.generation	= vp_generation,
 	.get_status	= vp_get_status,
 	.set_status	= vp_set_status,
+	.set_coalesce   = vp_set_coalesce,
 	.reset		= vp_reset,
 	.find_vqs	= vp_modern_find_vqs,
 	.del_vqs	= vp_del_vqs,
@@ -559,6 +570,10 @@ static inline void check_offsets(void)
 		     offsetof(struct virtio_pci_common_cfg, queue_used_lo));
 	BUILD_BUG_ON(VIRTIO_PCI_COMMON_Q_USEDHI !=
 		     offsetof(struct virtio_pci_common_cfg, queue_used_hi));
+	BUILD_BUG_ON(VIRTIO_PCI_COMMON_Q_COALESCE_C !=
+		offsetof(struct virtio_pci_common_cfg, queue_coalesce_count));
+	BUILD_BUG_ON(VIRTIO_PCI_COMMON_Q_COALESCE_U !=
+		offsetof(struct virtio_pci_common_cfg, queue_coalesce_us));
 }
 
 /* the PCI probing function */

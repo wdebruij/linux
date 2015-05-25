@@ -28,6 +28,12 @@
  * @set_status: write the status byte
  *	vdev: the virtio_device
  *	status: the new status byte
+ * @set_coalesce: set coalescing parameters
+ *	vdev: the virtio_device
+ *	n: the queue index
+ *	coalesce_count: maximum coalesced count before issuing interrupt
+ *      coalesce_count: maximum micro seconds to wait if there's a
+ *      pending buffer
  * @reset: reset the device
  *	vdev: the virtio device
  *	After this, status and feature negotiation must be done again
@@ -66,6 +72,8 @@ struct virtio_config_ops {
 	u32 (*generation)(struct virtio_device *vdev);
 	u8 (*get_status)(struct virtio_device *vdev);
 	void (*set_status)(struct virtio_device *vdev, u8 status);
+	void (*set_coalesce)(struct virtio_device *vdev, int n,
+			     u32 coalesce_count, u32 coalesce_us);
 	void (*reset)(struct virtio_device *vdev);
 	int (*find_vqs)(struct virtio_device *, unsigned nvqs,
 			struct virtqueue *vqs[],
