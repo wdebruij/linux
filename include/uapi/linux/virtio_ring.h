@@ -61,6 +61,7 @@
 /* The Host publishes the avail index for which it expects a kick
  * at the end of the used ring. Guest should ignore the used->flags field. */
 #define VIRTIO_RING_F_EVENT_IDX		29
+#define VIRTIO_RING_F_INTR_COALESCING   31
 
 /* Virtio ring descriptors: 16 bytes.  These can chain together via "next". */
 struct vring_desc {
