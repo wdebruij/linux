@@ -734,7 +734,6 @@ void virtqueue_disable_cb(struct virtqueue *_vq)
 		vq->avail_flags_shadow |= VRING_AVAIL_F_NO_INTERRUPT;
 		vq->vring.avail->flags = cpu_to_virtio16(_vq->vdev, vq->avail_flags_shadow);
 	}
-
 }
 EXPORT_SYMBOL_GPL(virtqueue_disable_cb);
 
