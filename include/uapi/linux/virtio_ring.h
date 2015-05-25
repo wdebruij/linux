@@ -62,6 +62,9 @@
  * at the end of the used ring. Guest should ignore the used->flags field. */
 #define VIRTIO_RING_F_EVENT_IDX		29
 
+/* Ring supports signal coalescing (host->guest interrupt, guest->host kick) */
+#define VIRTIO_RING_F_INTR_COALESCING   31
+
 /* Virtio ring descriptors: 16 bytes.  These can chain together via "next". */
 struct vring_desc {
 	/* Address (guest-physical). */

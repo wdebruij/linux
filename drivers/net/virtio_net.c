@@ -152,6 +152,14 @@ struct virtnet_info {
 	/* Ethtool settings */
 	u8 duplex;
 	u32 speed;
+
+	/* Budget for polling tx completion */
+	u32 tx_work_limit;
+
+	u32 rx_coalesce_usecs;
+	u32 rx_max_coalesced_frames;
+	u32 tx_coalesce_usecs;
+	u32 tx_max_coalesced_frames;
 };
 
 struct padded_vnet_hdr {
@@ -1335,6 +1343,58 @@ static void virtnet_get_channels(struct net_device *dev,
 	channels->other_count = 0;
 }
 
+static int virtnet_set_coalesce(struct net_device *dev,
+				struct ethtool_coalesce *ec)
+{
+	struct virtnet_info *vi = netdev_priv(dev);
+	int i;
+
+	if (!vi->vdev->config->set_coalesce) {
+		dev_warn(&dev->dev, "Transport does not support coalescing.\n");
+		return -EINVAL;
+	}
+
+	if (vi->rx_coalesce_usecs != ec->rx_coalesce_usecs ||
+	    vi->rx_max_coalesced_frames != ec->rx_max_coalesced_frames) {
+		for (i = 0; i < vi->max_queue_pairs; i++) {
+			vi->vdev->config->set_coalesce(vi->vdev, rxq2vq(i),
+						ec->rx_max_coalesced_frames,
+						ec->rx_coalesce_usecs);
+		}
+		vi->rx_coalesce_usecs = ec->rx_coalesce_usecs;
+		vi->rx_max_coalesced_frames = ec->rx_max_coalesced_frames;
+	}
+
+	if (vi->tx_coalesce_usecs != ec->tx_coalesce_usecs ||
+	    vi->tx_max_coalesced_frames != ec->tx_max_coalesced_frames) {
+		for (i = 0; i < vi->max_queue_pairs; i++) {
+			vi->vdev->config->set_coalesce(vi->vdev, txq2vq(i),
+						ec->tx_max_coalesced_frames,
+						ec->tx_coalesce_usecs);
+		}
+		vi->tx_coalesce_usecs = ec->tx_coalesce_usecs;
+		vi->tx_max_coalesced_frames = ec->tx_max_coalesced_frames;
+	}
+
+	vi->tx_work_limit = ec->tx_max_coalesced_frames_irq;
+
+	return 0;
+}
+
+static int virtnet_get_coalesce(struct net_device *dev,
+				struct ethtool_coalesce *ec)
+{
+	struct virtnet_info *vi = netdev_priv(dev);
+
+	ec->rx_coalesce_usecs = vi->rx_coalesce_usecs;
+	ec->rx_max_coalesced_frames = vi->rx_max_coalesced_frames;
+	ec->tx_coalesce_usecs = vi->tx_coalesce_usecs;
+	ec->tx_max_coalesced_frames = vi->tx_max_coalesced_frames;
+	ec->tx_max_coalesced_frames_irq = vi->tx_work_limit;
+
+	return 0;
+}
+
 /* Check if the user is trying to change anything besides speed/duplex */
 static bool virtnet_validate_ethtool_cmd(const struct ethtool_cmd *cmd)
 {
@@ -1398,6 +1458,8 @@ static const struct ethtool_ops virtnet_ethtool_ops = {
 	.get_ts_info = ethtool_op_get_ts_info,
 	.get_settings = virtnet_get_settings,
 	.set_settings = virtnet_set_settings,
+	.set_coalesce = virtnet_set_coalesce,
+	.get_coalesce = virtnet_get_coalesce,
 };
 
 #define MIN_MTU 68
