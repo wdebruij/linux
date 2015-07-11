@@ -2798,30 +2798,39 @@ out:
 
 static struct sk_buff *packet_alloc_skb(struct sock *sk, size_t prepad,
 				        size_t reserve, size_t len,
-				        size_t linear, int noblock,
+					size_t linear, int flags,
 				        int *err)
 {
 	struct sk_buff *skb;
+	size_t data_len;
 
-	/* Under a page?  Don't bother with paged skb. */
-	if (prepad + len < PAGE_SIZE || !linear)
-		linear = len;
+	if (flags & MSG_ZEROCOPY) {
+		/* Minimize linear, but respect header lower bound */
+		linear = reserve + min(len, max_t(size_t, linear, MAX_HEADER));
+		data_len = 0;
+	} else {
+		/* Under a page? Don't bother with paged skb. */
+		if (prepad + len < PAGE_SIZE || !linear)
+			linear = len;
+		data_len = len - linear;
+	}
 
-	skb = sock_alloc_send_pskb(sk, prepad + linear, len - linear, noblock,
-				   err, 0);
+	skb = sock_alloc_send_pskb(sk, prepad + linear, data_len,
+				   flags & MSG_DONTWAIT, err, 0);
 	if (!skb)
 		return NULL;
 
 	skb_reserve(skb, reserve);
 	skb_put(skb, linear);
-	skb->data_len = len - linear;
-	skb->len += len - linear;
+	skb->data_len = data_len;
+	skb->len += data_len;
 
 	return skb;
 }
 
 static int packet_snd(struct socket *sock, struct msghdr *msg, size_t len)
 {
+	struct iov_iter *from = &msg->msg_iter;
 	struct sock *sk = sock->sk;
 	DECLARE_SOCKADDR(struct sockaddr_ll *, saddr, msg->msg_name);
 	struct sk_buff *skb;
@@ -2897,7 +2906,7 @@ static int packet_snd(struct socket *sock, struct msghdr *msg, size_t len)
 	linear = __virtio16_to_cpu(vio_le(), vnet_hdr.hdr_len);
 	linear = max(linear, min_t(int, len, dev->hard_header_len));
 	skb = packet_alloc_skb(sk, hlen + tlen, hlen, len, linear,
-			       msg->msg_flags & MSG_DONTWAIT, &err);
+			       msg->msg_flags, &err);
 	if (skb == NULL)
 		goto out_unlock;
 
@@ -2911,9 +2920,15 @@ static int packet_snd(struct socket *sock, struct msghdr *msg, size_t len)
 	}
 
 	/* Returns -EFAULT on error */
-	err = skb_copy_datagram_from_iter(skb, offset, &msg->msg_iter, len);
+	err = skb_copy_datagram_from_iter(skb, offset, from, skb->len - offset);
 	if (err)
 		goto out_free;
+
+	if (msg->msg_flags & MSG_ZEROCOPY && len) {
+		err = skb_zerocopy_iter_alloc(skb, msg, iov_iter_count(from));
+		if (err)
+			goto out_free;
+	}
 
 	if (sock->type == SOCK_RAW &&
 	    !dev_validate_header(dev, skb->data, len)) {
@@ -2957,6 +2972,7 @@ static int packet_snd(struct socket *sock, struct msghdr *msg, size_t len)
 	return len;
 
 out_free:
+	skb_zcopy_abort(skb);
 	kfree_skb(skb);
 out_unlock:
 	if (dev)
