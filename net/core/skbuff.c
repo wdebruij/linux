@@ -593,21 +593,10 @@ static void skb_release_data(struct sk_buff *skb)
 	for (i = 0; i < shinfo->nr_frags; i++)
 		__skb_frag_unref(&shinfo->frags[i]);
 
-	/*
-	 * If skb buf is from userspace, we need to notify the caller
-	 * the lower device DMA has done;
-	 */
-	if (shinfo->tx_flags & SKBTX_DEV_ZEROCOPY) {
-		struct ubuf_info *uarg;
-
-		uarg = shinfo->destructor_arg;
-		if (uarg->callback)
-			uarg->callback(uarg, true);
-	}
-
 	if (shinfo->frag_list)
 		kfree_skb_list(shinfo->frag_list);
 
+	skb_zcopy_clear(skb);
 	skb_free_head(skb);
 }
 
@@ -726,14 +715,7 @@ EXPORT_SYMBOL(kfree_skb_list);
  */
 void skb_tx_error(struct sk_buff *skb)
 {
-	if (skb_shinfo(skb)->tx_flags & SKBTX_DEV_ZEROCOPY) {
-		struct ubuf_info *uarg;
-
-		uarg = skb_shinfo(skb)->destructor_arg;
-		if (uarg->callback)
-			uarg->callback(uarg, false);
-		skb_shinfo(skb)->tx_flags &= ~SKBTX_DEV_ZEROCOPY;
-	}
+	skb_zcopy_clear(skb);
 }
 EXPORT_SYMBOL(skb_tx_error);
 
@@ -1037,9 +1019,7 @@ int skb_zerocopy_add_frags_iter(struct sock *sk, struct sk_buff *skb,
 }
 EXPORT_SYMBOL_GPL(skb_zerocopy_add_frags_iter);
 
-/* unused only until next patch in the series; will remove attribute */
-static int __attribute__((unused))
-	   skb_zerocopy_clone(struct sk_buff *nskb, struct sk_buff *orig,
+static int skb_zerocopy_clone(struct sk_buff *nskb, struct sk_buff *orig,
 			      gfp_t gfp_mask)
 {
 	if (skb_zcopy(orig)) {
@@ -1048,6 +1028,8 @@ static int __attribute__((unused))
 			BUG_ON(!gfp_mask);
 			if (skb_uarg(nskb) == skb_uarg(orig))
 				return 0;
+			/* nskb is always new, writable, so copy ubufs is ok */
+			BUG_ON(skb_shared(nskb) || skb_cloned(nskb));
 			if (skb_copy_ubufs(nskb, GFP_ATOMIC))
 				return -EIO;
 		}
@@ -1079,12 +1061,13 @@ int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask)
 	int i;
 	int num_frags = skb_shinfo(skb)->nr_frags;
 	struct page *page, *head = NULL;
-	struct ubuf_info *uarg = skb_shinfo(skb)->destructor_arg;
 
-	if (skb_shared(skb) || skb_cloned(skb)) {
+	if (skb_shared(skb)) {
 		WARN_ON_ONCE(1);
 		return -EINVAL;
 	}
+	if (skb_unclone(skb, gfp_mask))
+		return -EINVAL;
 
 	for (i = 0; i < num_frags; i++) {
 		u8 *vaddr;
@@ -1125,8 +1108,6 @@ copy_done:
 	for (i = 0; i < num_frags; i++)
 		skb_frag_unref(skb, i);
 
-	uarg->callback(uarg, false);
-
 	/* skb frags point to kernel buffers */
 	for (i = num_frags - 1; i >= 0; i--) {
 		__skb_fill_page_desc(skb, i, head, 0,
@@ -1134,7 +1115,7 @@ copy_done:
 		head = (struct page *)page_private(head);
 	}
 
-	skb_shinfo(skb)->tx_flags &= ~SKBTX_DEV_ZEROCOPY;
+	skb_zcopy_clear(skb);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(skb_copy_ubufs);
@@ -1295,11 +1276,13 @@ struct sk_buff *__pskb_copy_fclone(struct sk_buff *skb, int headroom,
 	if (skb_shinfo(skb)->nr_frags) {
 		int i;
 
-		if (skb_orphan_frags(skb, gfp_mask)) {
+		if (skb_orphan_frags(skb, gfp_mask) ||
+		    skb_zerocopy_clone(n, skb, gfp_mask)) {
 			kfree_skb(n);
 			n = NULL;
 			goto out;
 		}
+
 		for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 			skb_shinfo(n)->frags[i] = skb_shinfo(skb)->frags[i];
 			skb_frag_ref(skb, i);
@@ -1372,9 +1355,10 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
 	 * be since all we did is relocate the values
 	 */
 	if (skb_cloned(skb)) {
-		/* copy this zero copy skb frags */
 		if (skb_orphan_frags(skb, gfp_mask))
 			goto nofrags;
+		if (skb_zcopy(skb))
+			atomic_inc(&skb_uarg(skb)->refcnt);
 		for (i = 0; i < skb_shinfo(skb)->nr_frags; i++)
 			skb_frag_ref(skb, i);
 
@@ -2462,6 +2446,7 @@ skb_zerocopy(struct sk_buff *to, struct sk_buff *from, int len, int hlen)
 		skb_tx_error(from);
 		return -ENOMEM;
 	}
+	skb_zerocopy_clone(to, from, GFP_ATOMIC);
 
 	for (i = 0; i < skb_shinfo(from)->nr_frags; i++) {
 		if (!len)
@@ -2758,6 +2743,7 @@ void skb_split(struct sk_buff *skb, struct sk_buff *skb1, const u32 len)
 	int pos = skb_headlen(skb);
 
 	skb_shinfo(skb1)->tx_flags = skb_shinfo(skb)->tx_flags & SKBTX_SHARED_FRAG;
+	skb_zerocopy_clone(skb1, skb, 0);
 	if (len < pos)	/* Split line is inside header. */
 		skb_split_inside_header(skb, skb1, len, pos);
 	else		/* Second chunk has no header, nothing to copy. */
@@ -2800,6 +2786,8 @@ int skb_shift(struct sk_buff *tgt, struct sk_buff *skb, int shiftlen)
 	BUG_ON(shiftlen > skb->len);
 
 	if (skb_headlen(skb))
+		return 0;
+	if (skb_zcopy(tgt) || skb_zcopy(skb))
 		return 0;
 
 	todo = shiftlen;
@@ -3364,6 +3352,8 @@ normal:
 
 		skb_shinfo(nskb)->tx_flags = skb_shinfo(head_skb)->tx_flags &
 			SKBTX_SHARED_FRAG;
+		if (skb_zerocopy_clone(nskb, head_skb, GFP_ATOMIC))
+			goto err;
 
 		while (pos < offset + len) {
 			if (i >= nfrags) {
@@ -4441,6 +4431,8 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 	}
 
 	if (skb_has_frag_list(to) || skb_has_frag_list(from))
+		return false;
+	if (skb_zcopy(to) || skb_zcopy(from))
 		return false;
 
 	if (skb_headlen(from) != 0) {
