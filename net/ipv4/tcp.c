@@ -1047,13 +1047,17 @@ static int linear_payload_sz(bool first_skb)
 	return 0;
 }
 
-static int select_size(const struct sock *sk, bool sg, bool first_skb)
+static int select_size(const struct sock *sk, bool sg, bool first_skb,
+		       bool zerocopy)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	int tmp = tp->mss_cache;
 
 	if (sg) {
 		if (sk_can_gso(sk)) {
+			if (zerocopy)
+				return 0;
+
 			tmp = linear_payload_sz(first_skb);
 		} else {
 			int pgbreak = SKB_MAX_HEAD(MAX_TCP_HEADER);
@@ -1106,6 +1110,7 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb;
 	struct sockcm_cookie sockc;
+	struct ubuf_info *uarg = NULL;
 	int flags, err, copied = 0;
 	int mss_now = 0, size_goal, copied_syn = 0;
 	bool process_backlog = false;
@@ -1175,6 +1180,21 @@ restart:
 
 	sg = !!(sk->sk_route_caps & NETIF_F_SG);
 
+	if (sg && (flags & MSG_ZEROCOPY) && size && !uarg) {
+		skb = tcp_send_head(sk) ? tcp_write_queue_tail(sk) : NULL;
+		uarg = sock_zerocopy_realloc(sk, size, skb_zcopy(skb));
+		if (!uarg) {
+			if ((err = sk_stream_wait_memory(sk, &timeo)) != 0)
+				goto out_err;
+			uarg = sock_zerocopy_realloc(sk, size, skb_zcopy(skb));
+			if (!uarg) {
+				err = -ENOBUFS;
+				goto out_err;
+			}
+		}
+		sock_zerocopy_get(uarg);
+	}
+
 	while (msg_data_left(msg)) {
 		int copy = 0;
 		int max = size_goal;
@@ -1202,7 +1222,7 @@ new_segment:
 			}
 			first_skb = skb_queue_empty(&sk->sk_write_queue);
 			skb = sk_stream_alloc_skb(sk,
-						  select_size(sk, sg, first_skb),
+						  select_size(sk, sg, first_skb, uarg),
 						  sk->sk_allocation,
 						  first_skb);
 			if (!skb)
@@ -1238,7 +1258,7 @@ new_segment:
 			err = skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
 			if (err)
 				goto do_fault;
-		} else {
+		} else if (!uarg) {
 			bool merge = true;
 			int i = skb_shinfo(skb)->nr_frags;
 			struct page_frag *pfrag = sk_page_frag(sk);
@@ -1276,6 +1296,15 @@ new_segment:
 				get_page(pfrag->page);
 			}
 			pfrag->offset += copy;
+		} else {
+			err = skb_zerocopy_add_frags_iter(sk, skb,
+							  &msg->msg_iter,
+							  copy, uarg);
+			if (err == -EMSGSIZE || err == -EEXIST)
+				goto new_segment;
+			if (err < 0)
+				goto do_error;
+			copy = err;
 		}
 
 		if (!copied)
@@ -1321,6 +1350,7 @@ out:
 	if (copied)
 		tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);
 out_nopush:
+	sock_zerocopy_put(uarg);
 	release_sock(sk);
 	return copied + copied_syn;
 
@@ -1338,6 +1368,7 @@ do_error:
 	if (copied + copied_syn)
 		goto out;
 out_err:
+	sock_zerocopy_put_abort(uarg);
 	err = sk_stream_error(sk, flags, err);
 	/* make sure we wake any epoll edge trigger waiter */
 	if (unlikely(skb_queue_len(&sk->sk_write_queue) == 0 &&
