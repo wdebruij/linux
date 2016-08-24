@@ -40,6 +40,11 @@ module_param(max_iotlb_entries, int, 0444);
 MODULE_PARM_DESC(max_iotlb_entries,
 	"Maximum number of iotlb entries. (default: 2048)");
 
+static int max_coalesce_buffers = 0;
+module_param(max_coalesce_buffers, int, 0644);
+static int max_coalesce_usecs = 0;
+module_param(max_coalesce_usecs, int, 0644);
+
 enum {
 	VHOST_MEMORY_F_LOG = 0x1,
 };
@@ -399,7 +404,7 @@ static void vhost_dev_free_iovecs(struct vhost_dev *dev)
 
 static bool vhost_can_coalesce(struct vhost_virtqueue *vq)
 {
-	return vq->max_coalesce_buffers;
+	return max_coalesce_buffers;
 }
 
 static void __vhost_signal(struct vhost_dev *dev, struct vhost_virtqueue *vq);
@@ -2207,7 +2212,7 @@ int vhost_add_used_n(struct vhost_virtqueue *vq, struct vring_used_elem *heads,
 
 	if (vhost_can_coalesce(vq)) {
 		if (count && !vq->coalesce_buffers)
-			hrtimer_start(&vq->ctimer, vq->max_coalesce_ktime,
+			hrtimer_start(&vq->ctimer, ns_to_ktime(max_coalesce_usecs * 1000),
 				      HRTIMER_MODE_REL);
 		vq->coalesce_buffers += count;
 	}
@@ -2267,7 +2272,7 @@ static void __vhost_signal(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 void vhost_signal(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 {
 	if (vhost_can_coalesce(vq)) {
-		if (vq->coalesce_buffers < vq->max_coalesce_buffers)
+		if (vq->coalesce_buffers < max_coalesce_buffers)
 			return;
 		hrtimer_try_to_cancel(&vq->ctimer);
 	}
