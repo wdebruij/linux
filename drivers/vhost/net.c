@@ -383,6 +383,9 @@ static void handle_tx(struct vhost_net *net)
 
 	vhost_disable_notify(&net->dev, vq);
 
+	/* will cause vhost_signal to restart the timer */
+	WRITE_ONCE(vq->coalesce_frames, 0);
+
 	hdr_size = nvq->vhost_hlen;
 	zcopy = nvq->ubufs;
 
