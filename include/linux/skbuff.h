@@ -424,6 +424,11 @@ struct ubuf_info {
 
 #define skb_uarg(SKB)	((struct ubuf_info *)(skb_shinfo(SKB)->destructor_arg))
 
+#define sock_can_zerocopy(sk, rt, csummode) \
+	((rt->dst.dev->features & NETIF_F_SG) && \
+	 ((sk->sk_type == SOCK_RAW) || \
+	  (sk->sk_type == SOCK_DGRAM && csummode & CHECKSUM_UNNECESSARY)))
+
 struct ubuf_info *sock_zerocopy_alloc(struct sock *sk, size_t size);
 struct ubuf_info *sock_zerocopy_realloc(struct sock *sk, size_t size,
 					struct ubuf_info *uarg);
