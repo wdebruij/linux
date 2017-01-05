@@ -978,6 +978,7 @@ struct ubuf_info *sock_zerocopy_alloc(struct sock *sk, size_t size)
 	uarg->callback = sock_zerocopy_callback;
 	uarg->id = ((u32)atomic_inc_return(&sk->sk_zckey)) - 1;
 	uarg->len = 1;
+	uarg->kbytelen = min_t(size_t, DIV_ROUND_UP(size, 1024u), USHRT_MAX);
 	atomic_set(&uarg->refcnt, 0);
 	sock_hold(sk);
 
@@ -994,6 +995,8 @@ struct ubuf_info *sock_zerocopy_realloc(struct sock *sk, size_t size,
 					struct ubuf_info *uarg)
 {
 	if (uarg) {
+		const size_t limit_kb = 512;	/* consider a sysctl */
+		size_t kbytelen;
 		u32 next;
 
 		/* realloc only when socket is locked (TCP, UDP cork),
@@ -1001,8 +1004,13 @@ struct ubuf_info *sock_zerocopy_realloc(struct sock *sk, size_t size,
 		 */
 		BUG_ON(!sock_owned_by_user(sk));
 
+		kbytelen = uarg->kbytelen + DIV_ROUND_UP(size, 1024u);
+		if (unlikely(kbytelen > limit_kb))
+			goto new_alloc;
+		uarg->kbytelen = kbytelen;
+
 		if (unlikely(uarg->len == USHRT_MAX - 1))
-			return NULL;
+			goto new_alloc;
 
 		next = (u32)atomic_read(&sk->sk_zckey);
 		if ((u32)(uarg->id + uarg->len) == next) {
@@ -1014,6 +1022,7 @@ struct ubuf_info *sock_zerocopy_realloc(struct sock *sk, size_t size,
 		}
 	}
 
+new_alloc:
 	return sock_zerocopy_alloc(sk, size);
 }
 EXPORT_SYMBOL_GPL(sock_zerocopy_realloc);
