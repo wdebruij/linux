@@ -932,7 +932,8 @@ struct ubuf_info *sock_zerocopy_alloc(struct sock *sk, size_t size)
 	uarg = (void *)skb->cb;
 
 	uarg->callback = sock_zerocopy_callback;
-	uarg->desc = atomic_inc_return(&sk->sk_zckey) - 1;
+	uarg->id = ((u32)atomic_inc_return(&sk->sk_zckey)) - 1;
+	uarg->len = 1;
 	atomic_set(&uarg->refcnt, 0);
 	sock_hold(sk);
 
@@ -945,24 +946,94 @@ static inline struct sk_buff *skb_from_uarg(struct ubuf_info *uarg)
 	return container_of((void *)uarg, struct sk_buff, cb);
 }
 
+struct ubuf_info *sock_zerocopy_realloc(struct sock *sk, size_t size,
+					struct ubuf_info *uarg)
+{
+	if (uarg) {
+		u32 next;
+
+		/* realloc only when socket is locked (TCP, UDP cork),
+		 * so uarg->len and sk_zckey access is serialized
+		 */
+		BUG_ON(!sock_owned_by_user(sk));
+
+		if (unlikely(uarg->len == USHRT_MAX - 1))
+			return NULL;
+
+		next = (u32)atomic_read(&sk->sk_zckey);
+		if ((u32)(uarg->id + uarg->len) == next) {
+			uarg->len++;
+			atomic_set(&sk->sk_zckey, ++next);
+			return uarg;
+		}
+	}
+
+	return sock_zerocopy_alloc(sk, size);
+}
+EXPORT_SYMBOL_GPL(sock_zerocopy_realloc);
+
+static bool skb_zerocopy_notify_extend(struct sk_buff *skb, u32 lo, u16 len)
+{
+	struct sock_exterr_skb *serr = SKB_EXT_ERR(skb);
+	s64 sum_len;
+	u32 old_lo, old_hi;
+
+	old_lo = serr->ee.ee_info;
+	old_hi = serr->ee.ee_data;
+	sum_len = old_hi - old_lo + 1 + len;
+	if (old_hi < old_lo)
+		sum_len += (1ULL << 32);
+
+	if (sum_len >= (1ULL << 32))
+		return false;
+
+	if (lo != old_hi + 1)
+		return false;
+
+	serr->ee.ee_data += len;
+	return true;
+}
+
 void sock_zerocopy_callback(struct ubuf_info *uarg, bool success)
 {
 	struct sock_exterr_skb *serr;
-	struct sk_buff *skb = skb_from_uarg(uarg);
+	struct sk_buff *head, *skb = skb_from_uarg(uarg);
 	struct sock *sk = skb->sk;
-	u16 id = uarg->desc;
+	struct sk_buff_head *q = &sk->sk_error_queue;
+	unsigned long flags;
+	u32 lo, hi;
+	u16 len;
+
+	/* if !len, there was only 1 call, and it was aborted
+	 * so do not queue a completion notification
+	 */
+	if (!uarg->len)
+		goto free;
+
+	len = uarg->len;
+	lo = uarg->id;
+	hi = uarg->id + len - 1;
 
 	serr = SKB_EXT_ERR(skb);
 	memset(serr, 0, sizeof(*serr));
 	serr->ee.ee_errno = 0;
 	serr->ee.ee_origin = SO_EE_ORIGIN_ZEROCOPY;
-	serr->ee.ee_data = id;
+	serr->ee.ee_data = hi;
+	serr->ee.ee_info = lo;
 
-	skb_queue_tail(&sk->sk_error_queue, skb);
+	spin_lock_irqsave(&q->lock, flags);
+	head = skb_peek(q);
+	if (!head || !skb_zerocopy_notify_extend(head, lo, len)) {
+		__skb_queue_tail(q, skb);
+		skb = NULL;
+	}
+	spin_unlock_irqrestore(&q->lock, flags);
 
 	if (!sock_flag(sk, SOCK_DEAD))
 		sk->sk_error_report(sk);
 
+free:
+	consume_skb(skb);
 	sock_put(sk);
 }
 EXPORT_SYMBOL_GPL(sock_zerocopy_callback);
@@ -977,6 +1048,17 @@ void sock_zerocopy_put(struct ubuf_info *uarg)
 	}
 }
 EXPORT_SYMBOL_GPL(sock_zerocopy_put);
+
+/* only called when sendmsg returns with error; no notification for this call */
+void sock_zerocopy_put_abort(struct ubuf_info *uarg)
+{
+	if (uarg) {
+		uarg->len--;
+		atomic_dec(&skb_from_uarg(uarg)->sk->sk_zckey);
+		sock_zerocopy_put(uarg);
+	}
+}
+EXPORT_SYMBOL_GPL(sock_zerocopy_put_abort);
 
 bool skb_zerocopy_alloc(struct sk_buff *skb, size_t size)
 {
