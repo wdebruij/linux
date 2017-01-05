@@ -7,6 +7,7 @@ NET_PROGS =  socket
 NET_PROGS += psock_fanout psock_tpacket
 NET_PROGS += reuseport_bpf reuseport_bpf_cpu reuseport_bpf_numa
 NET_PROGS += reuseport_dualstack
+NET_PROGS += snd_zerocopy snd_zerocopy_lo
 
 all: $(NET_PROGS)
 reuseport_bpf_numa: LDFLAGS += -lnuma

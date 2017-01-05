@@ -5,3 +5,5 @@ reuseport_bpf
 reuseport_bpf_cpu
 reuseport_bpf_numa
 reuseport_dualstack
+snd_zerocopy
+snd_zerocopy_lo
