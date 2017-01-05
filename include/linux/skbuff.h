@@ -406,13 +406,21 @@ enum {
 struct ubuf_info {
 	void (*callback)(struct ubuf_info *, bool zerocopy_success);
 	void *ctx;
-	unsigned long desc;
+	union {
+		unsigned long desc;
+		struct {
+			u32 id;
+			u16 len;
+		};
+	};
 	atomic_t refcnt;
 };
 
 #define skb_uarg(SKB)	((struct ubuf_info *)(skb_shinfo(SKB)->destructor_arg))
 
 struct ubuf_info *sock_zerocopy_alloc(struct sock *sk, size_t size);
+struct ubuf_info *sock_zerocopy_realloc(struct sock *sk, size_t size,
+					struct ubuf_info *uarg);
 
 static inline void sock_zerocopy_get(struct ubuf_info *uarg)
 {
@@ -420,6 +428,7 @@ static inline void sock_zerocopy_get(struct ubuf_info *uarg)
 }
 
 void sock_zerocopy_put(struct ubuf_info *uarg);
+void sock_zerocopy_put_abort(struct ubuf_info *uarg);
 
 void sock_zerocopy_callback(struct ubuf_info *uarg, bool success);
 
@@ -1266,6 +1275,16 @@ static inline void skb_zcopy_clear(struct sk_buff *skb)
 
 	if (uarg) {
 		sock_zerocopy_put(uarg);
+		skb_shinfo(skb)->tx_flags &= ~SKBTX_DEV_ZEROCOPY;
+	}
+}
+
+static inline void skb_zcopy_abort(struct sk_buff *skb)
+{
+	struct ubuf_info *uarg = skb_zcopy(skb);
+
+	if (uarg) {
+		sock_zerocopy_put_abort(uarg);
 		skb_shinfo(skb)->tx_flags &= ~SKBTX_DEV_ZEROCOPY;
 	}
 }
