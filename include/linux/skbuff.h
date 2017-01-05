@@ -411,6 +411,7 @@ struct ubuf_info {
 		struct {
 			u32 id;
 			u16 len;
+			u16 kbytelen;
 		};
 	};
 	atomic_t refcnt;
