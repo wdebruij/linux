@@ -351,7 +351,7 @@ static int raw_send_hdrinc(struct sock *sk, struct flowi4 *fl4,
 	unsigned int iphlen;
 	int err;
 	struct rtable *rt = *rtp;
-	int hlen, tlen;
+	int hlen, tlen, linear;
 
 	if (length > rt->dst.dev->mtu) {
 		ip_local_error(sk, EMSGSIZE, fl4->daddr, inet->inet_dport,
@@ -363,8 +363,14 @@ static int raw_send_hdrinc(struct sock *sk, struct flowi4 *fl4,
 
 	hlen = LL_RESERVED_SPACE(rt->dst.dev);
 	tlen = rt->dst.dev->needed_tailroom;
+	linear = length;
+
+	if (flags & MSG_ZEROCOPY && length &&
+	    sock_can_zerocopy(sk, rt, CHECKSUM_UNNECESSARY))
+		linear = min_t(int, length, MAX_HEADER);
+
 	skb = sock_alloc_send_skb(sk,
-				  length + hlen + tlen + 15,
+				  linear + hlen + tlen + 15,
 				  flags & MSG_DONTWAIT, &err);
 	if (!skb)
 		goto error;
@@ -377,7 +383,7 @@ static int raw_send_hdrinc(struct sock *sk, struct flowi4 *fl4,
 
 	skb_reset_network_header(skb);
 	iph = ip_hdr(skb);
-	skb_put(skb, length);
+	skb_put(skb, linear);
 
 	skb->ip_summed = CHECKSUM_NONE;
 
@@ -385,7 +391,7 @@ static int raw_send_hdrinc(struct sock *sk, struct flowi4 *fl4,
 
 	skb->transport_header = skb->network_header;
 	err = -EFAULT;
-	if (memcpy_from_msg(iph, msg, length))
+	if (memcpy_from_msg(iph, msg, linear))
 		goto error_free;
 
 	iphlen = iph->ihl * 4;
@@ -400,6 +406,17 @@ static int raw_send_hdrinc(struct sock *sk, struct flowi4 *fl4,
 	err = -EINVAL;
 	if (iphlen > length)
 		goto error_free;
+
+	if (length != linear) {
+		size_t datalen = length - linear;
+
+		if (!skb_zerocopy_alloc(skb, datalen))
+			goto error_zcopy;
+		err = skb_zerocopy_add_frags_iter(sk, skb, &msg->msg_iter,
+						  datalen, skb_uarg(skb));
+		if (err != datalen)
+			goto error_zcopy;
+	}
 
 	if (iphlen >= sizeof(*iph)) {
 		if (!iph->saddr)
@@ -427,6 +444,8 @@ static int raw_send_hdrinc(struct sock *sk, struct flowi4 *fl4,
 out:
 	return 0;
 
+error_zcopy:
+	sock_zerocopy_put_abort(skb_zcopy(skb));
 error_free:
 	kfree_skb(skb);
 error:
