@@ -627,6 +627,7 @@ static int rawv6_send_hdrinc(struct sock *sk, struct msghdr *msg, int length,
 	struct rt6_info *rt = (struct rt6_info *)*dstp;
 	int hlen = LL_RESERVED_SPACE(rt->dst.dev);
 	int tlen = rt->dst.dev->needed_tailroom;
+	int linear = length;
 
 	if (length > rt->dst.dev->mtu) {
 		ipv6_local_error(sk, EMSGSIZE, fl6, rt->dst.dev->mtu);
@@ -637,8 +638,12 @@ static int rawv6_send_hdrinc(struct sock *sk, struct msghdr *msg, int length,
 	if (flags&MSG_PROBE)
 		goto out;
 
+	if (flags & MSG_ZEROCOPY &&
+	    rt->dst.dev->features & NETIF_F_SG)
+		linear = min_t(int, length, MAX_HEADER);
+
 	skb = sock_alloc_send_skb(sk,
-				  length + hlen + tlen + 15,
+				  linear + hlen + tlen + 15,
 				  flags & MSG_DONTWAIT, &err);
 	if (!skb)
 		goto error;
@@ -650,7 +655,7 @@ static int rawv6_send_hdrinc(struct sock *sk, struct msghdr *msg, int length,
 	skb_dst_set(skb, &rt->dst);
 	*dstp = NULL;
 
-	skb_put(skb, length);
+	skb_put(skb, linear);
 	skb_reset_network_header(skb);
 	iph = ipv6_hdr(skb);
 
@@ -660,9 +665,16 @@ static int rawv6_send_hdrinc(struct sock *sk, struct msghdr *msg, int length,
 		skb_set_dst_pending_confirm(skb, 1);
 
 	skb->transport_header = skb->network_header;
-	err = memcpy_from_msg(iph, msg, length);
+	err = memcpy_from_msg(iph, msg, linear);
 	if (err)
 		goto error_fault;
+
+	if (flags & MSG_ZEROCOPY) {
+		err = skb_zerocopy_iter_alloc(skb, (void *)&msg,
+					      length - linear);
+		if (err)
+			goto error_zcopy;
+	}
 
 	/* if egress device is enslaved to an L3 master device pass the
 	 * skb to its handler for processing
@@ -681,6 +693,8 @@ static int rawv6_send_hdrinc(struct sock *sk, struct msghdr *msg, int length,
 out:
 	return 0;
 
+error_zcopy:
+	skb_zcopy_abort(skb);
 error_fault:
 	err = -EFAULT;
 	kfree_skb(skb);
