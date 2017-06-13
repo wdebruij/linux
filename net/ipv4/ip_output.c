@@ -919,7 +919,7 @@ static int __ip_append_data(struct sock *sk,
 {
 	struct inet_sock *inet = inet_sk(sk);
 	struct sk_buff *skb;
-
+	struct ubuf_info *uarg = NULL;
 	struct ip_options *opt = cork->opt;
 	int hh_len;
 	int exthdrlen;
@@ -963,9 +963,21 @@ static int __ip_append_data(struct sock *sk,
 	    !exthdrlen)
 		csummode = CHECKSUM_PARTIAL;
 
+	if (flags & MSG_ZEROCOPY && length) {
+		uarg = sock_zerocopy_realloc(sk, length, skb_zcopy(skb));
+		if (!uarg)
+			return -ENOBUFS;
+
+		if (!(rt->dst.dev->features & NETIF_F_SG) ||
+		    (sk->sk_type == SOCK_DGRAM && csummode == CHECKSUM_NONE)) {
+			uarg->zerocopy = 0;
+			skb_zcopy_set(skb, uarg);
+		}
+	}
+
 	cork->length += length;
 	if ((((length + fragheaderlen) > mtu) || (skb && skb_is_gso(skb))) &&
-	    (sk->sk_protocol == IPPROTO_UDP) &&
+	    (sk->sk_protocol == IPPROTO_UDP) && !uarg &&
 	    (rt->dst.dev->features & NETIF_F_UFO) && !dst_xfrm(&rt->dst) &&
 	    (sk->sk_type == SOCK_DGRAM) && !sk->sk_no_check_tx) {
 		err = ip_ufo_append_data(sk, queue, getfrag, from, length,
@@ -997,6 +1009,7 @@ static int __ip_append_data(struct sock *sk,
 			unsigned int fraglen;
 			unsigned int fraggap;
 			unsigned int alloclen;
+			unsigned int zcopylen = 0;
 			struct sk_buff *skb_prev;
 alloc_new_skb:
 			skb_prev = skb;
@@ -1017,8 +1030,12 @@ alloc_new_skb:
 			if ((flags & MSG_MORE) &&
 			    !(rt->dst.dev->features&NETIF_F_SG))
 				alloclen = mtu;
-			else
+			else if (!uarg || !uarg->zerocopy)
 				alloclen = fraglen;
+			else {
+				alloclen = min_t(int, fraglen, MAX_HEADER);
+				zcopylen = fraglen - alloclen;
+			}
 
 			alloclen += exthdrlen;
 
@@ -1059,11 +1076,12 @@ alloc_new_skb:
 			cork->tx_flags = 0;
 			skb_shinfo(skb)->tskey = tskey;
 			tskey = 0;
+			skb_zcopy_set(skb, uarg);
 
 			/*
 			 *	Find where to start putting bytes.
 			 */
-			data = skb_put(skb, fraglen + exthdrlen);
+			data = skb_put(skb, fraglen + exthdrlen - zcopylen);
 			skb_set_network_header(skb, exthdrlen);
 			skb->transport_header = (skb->network_header +
 						 fragheaderlen);
@@ -1079,7 +1097,7 @@ alloc_new_skb:
 				pskb_trim_unique(skb_prev, maxfraglen);
 			}
 
-			copy = datalen - transhdrlen - fraggap;
+			copy = datalen - transhdrlen - fraggap - zcopylen;
 			if (copy > 0 && getfrag(from, data + transhdrlen, offset, copy, fraggap, skb) < 0) {
 				err = -EFAULT;
 				kfree_skb(skb);
@@ -1087,7 +1105,7 @@ alloc_new_skb:
 			}
 
 			offset += copy;
-			length -= datalen - fraggap;
+			length -= copy + transhdrlen;
 			transhdrlen = 0;
 			exthdrlen = 0;
 			csummode = CHECKSUM_NONE;
@@ -1115,7 +1133,7 @@ alloc_new_skb:
 				err = -EFAULT;
 				goto error;
 			}
-		} else {
+		} else if (!uarg || !uarg->zerocopy) {
 			int i = skb_shinfo(skb)->nr_frags;
 
 			err = -ENOMEM;
@@ -1145,6 +1163,10 @@ alloc_new_skb:
 			skb->data_len += copy;
 			skb->truesize += copy;
 			atomic_add(copy, &sk->sk_wmem_alloc);
+		} else {
+			err = skb_zerocopy_iter(sk, skb, from, copy);
+			if (err)
+				goto error;
 		}
 		offset += copy;
 		length -= copy;
@@ -1155,6 +1177,7 @@ alloc_new_skb:
 error_efault:
 	err = -EFAULT;
 error:
+	sock_zerocopy_put_abort(uarg);
 	cork->length -= length;
 	IP_INC_STATS(sock_net(sk), IPSTATS_MIB_OUTDISCARDS);
 	return err;
