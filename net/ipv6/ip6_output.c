@@ -1240,6 +1240,7 @@ static int __ip6_append_data(struct sock *sk,
 	struct ipv6_txoptions *opt = v6_cork->opt;
 	int csummode = CHECKSUM_NONE;
 	unsigned int maxnonfragsize, headersize;
+	struct ubuf_info *uarg = NULL;
 
 	skb = skb_peek_tail(queue);
 	if (!skb) {
@@ -1301,6 +1302,18 @@ emsgsize:
 			tskey = sk->sk_tskey++;
 	}
 
+	if (flags & MSG_ZEROCOPY && length) {
+		uarg = sock_zerocopy_realloc(sk, length, skb_zcopy(skb));
+		if (!uarg)
+			return -ENOBUFS;
+
+		if (!(rt->dst.dev->features & NETIF_F_SG) ||
+		    (sk->sk_type == SOCK_DGRAM && csummode == CHECKSUM_NONE)) {
+			uarg->zerocopy = 0;
+			skb_zcopy_set(skb, uarg);
+		}
+	}
+
 	/*
 	 * Let's try using as much space as possible.
 	 * Use MTU if total length of the message fits into the MTU.
@@ -1333,6 +1346,7 @@ emsgsize:
 			unsigned int fraglen;
 			unsigned int fraggap;
 			unsigned int alloclen;
+			unsigned int zcopylen = 0;
 alloc_new_skb:
 			/* There's no room in the current skb */
 			if (skb)
@@ -1355,11 +1369,17 @@ alloc_new_skb:
 
 			if (datalen > (cork->length <= mtu && !(cork->flags & IPCORK_ALLFRAG) ? mtu : maxfraglen) - fragheaderlen)
 				datalen = maxfraglen - fragheaderlen - rt->dst.trailer_len;
+			fraglen = datalen + fragheaderlen;
+
 			if ((flags & MSG_MORE) &&
 			    !(rt->dst.dev->features&NETIF_F_SG))
 				alloclen = mtu;
-			else
-				alloclen = datalen + fragheaderlen;
+			else if (!uarg || !uarg->zerocopy)
+				alloclen = fraglen;
+			else {
+				alloclen = min_t(int, fraglen, MAX_HEADER);
+				zcopylen = fraglen - alloclen;
+			}
 
 			alloclen += dst_exthdrlen;
 
@@ -1381,7 +1401,7 @@ alloc_new_skb:
 			 */
 			alloclen += sizeof(struct frag_hdr);
 
-			copy = datalen - transhdrlen - fraggap;
+			copy = datalen - transhdrlen - fraggap - zcopylen;
 			if (copy < 0) {
 				err = -EINVAL;
 				goto error;
@@ -1417,11 +1437,12 @@ alloc_new_skb:
 			tx_flags = 0;
 			skb_shinfo(skb)->tskey = tskey;
 			tskey = 0;
+			skb_zcopy_set(skb, uarg);
 
 			/*
 			 *	Find where to start putting bytes
 			 */
-			data = skb_put(skb, fraglen);
+			data = skb_put(skb, fraglen - zcopylen);
 			skb_set_network_header(skb, exthdrlen);
 			data += fragheaderlen;
 			skb->transport_header = (skb->network_header +
@@ -1444,7 +1465,7 @@ alloc_new_skb:
 			}
 
 			offset += copy;
-			length -= datalen - fraggap;
+			length -= copy + transhdrlen;
 			transhdrlen = 0;
 			exthdrlen = 0;
 			dst_exthdrlen = 0;
@@ -1472,7 +1493,7 @@ alloc_new_skb:
 				err = -EFAULT;
 				goto error;
 			}
-		} else {
+		} else if (!uarg || !uarg->zerocopy) {
 			int i = skb_shinfo(skb)->nr_frags;
 
 			err = -ENOMEM;
@@ -1502,6 +1523,10 @@ alloc_new_skb:
 			skb->data_len += copy;
 			skb->truesize += copy;
 			refcount_add(copy, &sk->sk_wmem_alloc);
+		} else {
+			err = skb_zerocopy_iter(sk, skb, from, copy);
+			if (err)
+				goto error;
 		}
 		offset += copy;
 		length -= copy;
@@ -1512,6 +1537,7 @@ alloc_new_skb:
 error_efault:
 	err = -EFAULT;
 error:
+	sock_zerocopy_put_abort(uarg);
 	cork->length -= length;
 	IP6_INC_STATS(sock_net(sk), rt->rt6i_idev, IPSTATS_MIB_OUTDISCARDS);
 	return err;
