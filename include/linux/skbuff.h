@@ -414,6 +414,7 @@ struct ubuf_info {
 		struct {
 			u32 id;
 			u16 len;
+			u16 zerocopy:1;
 			u32 bytelen;
 		};
 	};
@@ -1290,6 +1291,7 @@ static inline void skb_zcopy_clear(struct sk_buff *skb, bool zerocopy)
 	struct ubuf_info *uarg = skb_zcopy(skb);
 
 	if (uarg) {
+		uarg->zerocopy = uarg->zerocopy && zerocopy;
 		sock_zerocopy_put(uarg);
 		skb_shinfo(skb)->tx_flags &= ~SKBTX_ZEROCOPY_FRAG;
 	}

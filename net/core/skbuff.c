@@ -934,6 +934,7 @@ struct ubuf_info *sock_zerocopy_alloc(struct sock *sk, size_t size)
 	uarg->callback = sock_zerocopy_callback;
 	uarg->id = ((u32)atomic_inc_return(&sk->sk_zckey)) - 1;
 	uarg->len = 1;
+	uarg->zerocopy = 1;
 	uarg->bytelen = size;
 	atomic_set(&uarg->refcnt, 0);
 	sock_hold(sk);
@@ -1030,6 +1031,8 @@ void sock_zerocopy_callback(struct ubuf_info *uarg, bool success)
 	serr->ee.ee_origin = SO_EE_ORIGIN_ZEROCOPY;
 	serr->ee.ee_data = hi;
 	serr->ee.ee_info = lo;
+	if (!success)
+		serr->ee.ee_code |= SO_EE_CODE_ZEROCOPY_COPIED;
 
 	spin_lock_irqsave(&q->lock, flags);
 	tail = skb_peek_tail(q);
@@ -1052,7 +1055,7 @@ void sock_zerocopy_put(struct ubuf_info *uarg)
 {
 	if (uarg && atomic_dec_and_test(&uarg->refcnt)) {
 		if (uarg->callback)
-			uarg->callback(uarg, true);
+			uarg->callback(uarg, uarg->zerocopy);
 		else
 			consume_skb(skb_from_uarg(uarg));
 	}
