@@ -100,4 +100,6 @@
 
 #define SO_COOKIE		57
 
+#define SO_ZEROCOPY		59
+
 #endif /* __ASM_GENERIC_SOCKET_H */
