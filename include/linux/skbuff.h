@@ -2563,9 +2563,7 @@ static inline int skb_orphan_frags(struct sk_buff *skb, gfp_t gfp_mask)
 /* Frags must be orphaned, even if refcounted, if skb might loop to rx path */
 static inline int skb_orphan_frags_rx(struct sk_buff *skb, gfp_t gfp_mask)
 {
-	if (likely(!skb_zcopy(skb)))
-		return 0;
-	return skb_copy_ubufs(skb, gfp_mask);
+	return skb_orphan_frags(skb, gfp_mask);
 }
 
 /**
