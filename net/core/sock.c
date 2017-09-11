@@ -1047,9 +1047,8 @@ set_rcvbuf:
 		break;
 
 	case SO_ZEROCOPY:
-		if (sk->sk_family != PF_INET && sk->sk_family != PF_INET6)
-			ret = -ENOTSUPP;
-		else if (sk->sk_protocol != IPPROTO_TCP)
+		if (sk->sk_family != PF_INET && sk->sk_family != PF_INET6 &&
+		    sk->sk_family != PF_PACKET)
 			ret = -ENOTSUPP;
 		else if (sk->sk_state != TCP_CLOSE)
 			ret = -EBUSY;

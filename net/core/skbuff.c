@@ -960,7 +960,7 @@ struct ubuf_info *sock_zerocopy_alloc(struct sock *sk, size_t size)
 	uarg->len = 1;
 	uarg->bytelen = size;
 	uarg->zerocopy = 1;
-	refcount_set(&uarg->refcnt, 1);
+	refcount_set(&uarg->refcnt, sk->sk_type == SOCK_STREAM ? 1 : 0);
 	sock_hold(sk);
 
 	return uarg;
@@ -1107,6 +1107,37 @@ EXPORT_SYMBOL_GPL(sock_zerocopy_put_abort);
 
 extern int __zerocopy_sg_from_iter(struct sock *sk, struct sk_buff *skb,
 				   struct iov_iter *from, size_t length);
+
+int skb_zerocopy_iter(struct sock *sk, struct sk_buff *skb, struct msghdr *msg,
+		      int len)
+{
+	/* raw has extra indirection in raw_frag_vec */
+	if (sk->sk_type == SOCK_RAW && sk->sk_family != PF_PACKET)
+		msg = *(struct msghdr **)msg;
+
+	return __zerocopy_sg_from_iter(sk, skb, &msg->msg_iter, len);
+}
+EXPORT_SYMBOL_GPL(skb_zerocopy_iter);
+
+int skb_zerocopy_iter_alloc(struct sk_buff *skb, struct msghdr *msg, int len)
+{
+	struct ubuf_info *uarg;
+	int err;
+
+	uarg = sock_zerocopy_alloc(skb->sk, len);
+	if (!uarg)
+		return -ENOBUFS;
+
+	err = skb_zerocopy_iter(skb->sk, skb, msg, len);
+	if (err) {
+		sock_zerocopy_put_abort(uarg);
+		return err;
+	}
+
+	skb_zcopy_set(skb, uarg);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(skb_zerocopy_iter_alloc);
 
 int skb_zerocopy_iter_stream(struct sock *sk, struct sk_buff *skb,
 			     struct msghdr *msg, int len,
