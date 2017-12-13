@@ -1176,19 +1176,17 @@ static int skb_zerocopy_clone(struct sk_buff *nskb, struct sk_buff *orig,
  */
 int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask)
 {
+	int i;
 	int num_frags = skb_shinfo(skb)->nr_frags;
 	struct page *page, *head = NULL;
-	int i, new_frags;
-	u32 d_off;
+	struct ubuf_info *uarg = skb_shinfo(skb)->destructor_arg;
 
-	if (!num_frags)
-		return 0;
+	for (i = 0; i < num_frags; i++) {
+		skb_frag_t *f = &skb_shinfo(skb)->frags[i];
+		u32 p_off, p_len, copied;
+		struct page *p;
+		u8 *vaddr;
 
-	if (skb_shared(skb) || skb_unclone(skb, gfp_mask))
-		return -EINVAL;
-
-	new_frags = (__skb_pagelen(skb) + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	for (i = 0; i < new_frags; i++) {
 		page = alloc_page(gfp_mask);
 		if (!page) {
 			while (head) {
@@ -1198,36 +1196,17 @@ int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask)
 			}
 			return -ENOMEM;
 		}
-		set_page_private(page, (unsigned long)head);
-		head = page;
-	}
-
-	page = head;
-	d_off = 0;
-	for (i = 0; i < num_frags; i++) {
-		skb_frag_t *f = &skb_shinfo(skb)->frags[i];
-		u32 p_off, p_len, copied;
-		struct page *p;
-		u8 *vaddr;
 
 		skb_frag_foreach_page(f, f->page_offset, skb_frag_size(f),
 				      p, p_off, p_len, copied) {
-			u32 copy, done = 0;
 			vaddr = kmap_atomic(p);
-
-			while (done < p_len) {
-				if (d_off == PAGE_SIZE) {
-					d_off = 0;
-					page = (struct page *)page_private(page);
-				}
-				copy = min_t(u32, PAGE_SIZE - d_off, p_len - done);
-				memcpy(page_address(page) + d_off,
-				       vaddr + p_off + done, copy);
-				done += copy;
-				d_off += copy;
-			}
+			memcpy(page_address(page) + copied, vaddr + p_off,
+			       p_len);
 			kunmap_atomic(vaddr);
 		}
+
+		set_page_private(page, (unsigned long)head);
+		head = page;
 	}
 
 	/* skb frags release userspace buffers */
@@ -1235,12 +1214,11 @@ int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask)
 		skb_frag_unref(skb, i);
 
 	/* skb frags point to kernel buffers */
-	for (i = 0; i < new_frags - 1; i++) {
-		__skb_fill_page_desc(skb, i, head, 0, PAGE_SIZE);
+	for (i = num_frags - 1; i >= 0; i--) {
+		__skb_fill_page_desc(skb, i, head, 0,
+				     skb_shinfo(skb)->frags[i].size);
 		head = (struct page *)page_private(head);
 	}
-	__skb_fill_page_desc(skb, new_frags - 1, head, 0, d_off);
-	skb_shinfo(skb)->nr_frags = new_frags;
 
 	skb_zcopy_clear(skb, false);
 	return 0;
