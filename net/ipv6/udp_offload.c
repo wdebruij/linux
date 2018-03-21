@@ -17,6 +17,17 @@
 #include <net/ip6_checksum.h>
 #include "ip6_offload.h"
 
+static struct sk_buff *__udp6_gso_segment(struct sk_buff *gso_skb,
+					  netdev_features_t features)
+{
+	const struct ipv6hdr *ip6h = ipv6_hdr(gso_skb);
+	unsigned int mss = skb_shinfo(gso_skb)->gso_size;
+
+	return __udp_gso_segment(gso_skb, features, mss,
+				 udp_v6_check(sizeof(struct udphdr) + mss,
+					      &ip6h->saddr, &ip6h->daddr, 0));
+}
+
 static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 					 netdev_features_t features)
 {
@@ -47,6 +58,9 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 
 		if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 			goto out;
+
+		if (!skb_is_ufo(skb))
+			return __udp6_gso_segment(skb, features);
 
 		/* Do software UFO. Complete and fill in the UDP checksum as HW cannot
 		 * do checksum of UDP packets sent as multiple IP fragments.

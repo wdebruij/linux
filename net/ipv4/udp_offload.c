@@ -187,6 +187,50 @@ out_unlock:
 }
 EXPORT_SYMBOL(skb_udp_tunnel_segment);
 
+struct sk_buff *__udp_gso_segment(struct sk_buff *gso_skb,
+				  netdev_features_t features,
+				  unsigned int mss, __sum16 check)
+{
+	struct udphdr *uh = udp_hdr(gso_skb);
+	struct sk_buff *segs;
+	unsigned int hdrlen;
+
+	if (gso_skb->len <= sizeof(*uh) + mss)
+		return ERR_PTR(-EINVAL);
+
+	uh->len = htons(sizeof(*uh) + mss);
+	uh->check = check;
+	skb_pull(gso_skb, sizeof(*uh));
+	hdrlen = gso_skb->data - skb_mac_header(gso_skb);
+
+	segs = skb_segment(gso_skb, features);
+	if (unlikely(IS_ERR_OR_NULL(segs)))
+		return segs;
+
+	/* If last packet is not full, fix up its header */
+	if (segs->prev->len != hdrlen + mss) {
+		unsigned int mss_last = segs->prev->len - hdrlen;
+
+		uh = udp_hdr(segs->prev);
+		uh->len = htons(sizeof(*uh) + mss_last);
+		csum_replace2(&uh->check, htons(mss), htons(mss_last));
+	}
+
+	return segs;
+}
+
+static struct sk_buff *__udp4_gso_segment(struct sk_buff *gso_skb,
+					  netdev_features_t features)
+{
+	const struct iphdr *iph = ip_hdr(gso_skb);
+	unsigned int mss = skb_shinfo(gso_skb)->gso_size;
+
+	return __udp_gso_segment(gso_skb, features, mss,
+				 udp_v4_check(sizeof(struct udphdr) + mss,
+					      iph->saddr, iph->daddr, 0));
+}
+EXPORT_SYMBOL_GPL(__udp4_gso_segment);
+
 static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 					 netdev_features_t features)
 {
@@ -208,6 +252,9 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 
 	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 		goto out;
+
+	if (!skb_is_ufo(skb))
+		return __udp4_gso_segment(skb, features);
 
 	mss = skb_shinfo(skb)->gso_size;
 	if (unlikely(skb->len <= mss))

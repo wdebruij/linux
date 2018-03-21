@@ -573,6 +573,8 @@ enum {
 	SKB_GSO_ESP = 1 << 15,
 
 	SKB_GSO_UDP = 1 << 16,
+
+	SKB_GSO_UDP_L4 = 1 << 17,
 };
 
 #if BITS_PER_LONG > 32
@@ -4045,6 +4047,13 @@ static inline bool skb_is_gso_v6(const struct sk_buff *skb)
 static inline bool skb_is_gso_sctp(const struct sk_buff *skb)
 {
 	return skb_shinfo(skb)->gso_type & SKB_GSO_SCTP;
+}
+
+static inline bool skb_is_ufo(const struct sk_buff *skb)
+{
+	const unsigned int gso_type = skb_shinfo(skb)->gso_type;
+
+	return (gso_type & (SKB_GSO_UDP | SKB_GSO_UDP_L4)) == SKB_GSO_UDP;
 }
 
 static inline void skb_gso_reset(struct sk_buff *skb)
