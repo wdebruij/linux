@@ -21,3 +21,11 @@ echo "ipv4 connected"
 # blocked on 2nd loopback address
 # echo "ipv6 connected"
 # ./in_netns.sh ./udpgso -6 -c
+
+# ip forces CHECKSUM_NONE with MSG_MORE
+# echo "ipv4 msg_more"
+# ./in_netns.sh ./udpgso -4 -C -m
+
+# ipv6 forces CHECKSUM_NONE with MSG_MORE
+# echo "ipv6 msg_more"
+# ./in_netns.sh ./udpgso -6 -C -m
