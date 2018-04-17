@@ -8,3 +8,5 @@ reuseport_bpf_numa
 reuseport_dualstack
 reuseaddr_conflict
 udpgso
+udpgso_bench_rx
+udpgso_bench_tx
