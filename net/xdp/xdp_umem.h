@@ -37,7 +37,9 @@ struct xdp_umem {
 	atomic_t users;
 };
 
+bool xdp_umem_validate_queues(struct xdp_umem *umem);
 int xdp_umem_reg(struct xdp_umem *umem, struct xdp_umem_reg *mr);
+void xdp_get_umem(struct xdp_umem *umem);
 void xdp_put_umem(struct xdp_umem *umem);
 int xdp_umem_create(struct xdp_umem **umem);
 

@@ -93,6 +93,11 @@ out:
 	kfree(umem);
 }
 
+void xdp_get_umem(struct xdp_umem *umem)
+{
+	atomic_inc(&umem->users);
+}
+
 void xdp_put_umem(struct xdp_umem *umem)
 {
 	if (!umem)
@@ -240,3 +245,7 @@ int xdp_umem_reg(struct xdp_umem *umem, struct xdp_umem_reg *mr)
 	return err;
 }
 
+bool xdp_umem_validate_queues(struct xdp_umem *umem)
+{
+	return umem->fq;
+}
