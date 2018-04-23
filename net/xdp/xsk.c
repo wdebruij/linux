@@ -38,6 +38,8 @@
 struct xdp_sock {
 	/* struct sock must be the first member of struct xdp_sock */
 	struct sock sk;
+	struct xsk_queue *rx;
+	struct net_device *dev;
 	struct xdp_umem *umem;
 	/* Protects multiple processes in the control path */
 	struct mutex mutex;
@@ -48,14 +50,15 @@ static struct xdp_sock *xdp_sk(struct sock *sk)
 	return (struct xdp_sock *)sk;
 }
 
-static int xsk_init_queue(u32 entries, struct xsk_queue **queue)
+static int xsk_init_queue(u32 entries, struct xsk_queue **queue,
+			  bool umem_queue)
 {
 	struct xsk_queue *q;
 
 	if (entries == 0 || *queue || !is_power_of_2(entries))
 		return -EINVAL;
 
-	q = xskq_create(entries);
+	q = xskq_create(entries, umem_queue);
 	if (!q)
 		return -ENOMEM;
 
@@ -97,6 +100,22 @@ static int xsk_setsockopt(struct socket *sock, int level, int optname,
 		return -ENOPROTOOPT;
 
 	switch (optname) {
+	case XDP_RX_RING:
+	{
+		struct xsk_queue **q;
+		int entries;
+
+		if (optlen < sizeof(entries))
+			return -EINVAL;
+		if (copy_from_user(&entries, optval, sizeof(entries)))
+			return -EFAULT;
+
+		mutex_lock(&xs->mutex);
+		q = &xs->rx;
+		err = xsk_init_queue(entries, q, false);
+		mutex_unlock(&xs->mutex);
+		return err;
+	}
 	case XDP_UMEM_REG:
 	{
 		struct xdp_umem_reg mr;
@@ -138,7 +157,7 @@ static int xsk_setsockopt(struct socket *sock, int level, int optname,
 
 		mutex_lock(&xs->mutex);
 		q = &xs->umem->fq;
-		err = xsk_init_queue(entries, q);
+		err = xsk_init_queue(entries, q, true);
 		mutex_unlock(&xs->mutex);
 		return err;
 	}
@@ -159,13 +178,17 @@ static int xsk_mmap(struct file *file, struct socket *sock,
 	unsigned long pfn;
 	struct page *qpg;
 
-	if (!xs->umem)
-		return -EINVAL;
+	if (offset == XDP_PGOFF_RX_RING) {
+		q = xs->rx;
+	} else {
+		if (!xs->umem)
+			return -EINVAL;
 
-	if (offset == XDP_UMEM_PGOFF_FILL_RING)
-		q = xs->umem->fq;
-	else
-		return -EINVAL;
+		if (offset == XDP_UMEM_PGOFF_FILL_RING)
+			q = xs->umem->fq;
+		else
+			return -EINVAL;
+	}
 
 	qpg = virt_to_head_page(q->ring);
 	if (size > (PAGE_SIZE << compound_order(qpg)))
@@ -210,6 +233,7 @@ static void xsk_destruct(struct sock *sk)
 	if (!sock_flag(sk, SOCK_DEAD))
 		return;
 
+	xskq_destroy(xs->rx);
 	xdp_put_umem(xs->umem);
 
 	sk_refcnt_debug_dec(sk);
