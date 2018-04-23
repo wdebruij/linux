@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0
- * XDP user-space packet buffer
+ * XDP user-space ring structure
  * Copyright(c) 2018 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -12,33 +12,27 @@
  * more details.
  */
 
-#ifndef XDP_UMEM_H_
-#define XDP_UMEM_H_
+#ifndef _LINUX_XSK_QUEUE_H
+#define _LINUX_XSK_QUEUE_H
 
-#include <linux/mm.h>
+#include <linux/types.h>
 #include <linux/if_xdp.h>
 
-#include "xsk_queue.h"
 #include "xdp_umem_props.h"
 
-struct xdp_umem {
-	struct xsk_queue *fq;
-	struct page **pgs;
-	struct xdp_umem_props props;
-	u32 npgs;
-	u32 frame_headroom;
-	u32 nfpp_mask;
-	u32 nfpplog2;
-	u32 frame_size_log2;
-	struct user_struct *user;
-	struct pid *pid;
-	unsigned long address;
-	size_t size;
-	atomic_t users;
+struct xsk_queue {
+	struct xdp_umem_props umem_props;
+	u32 ring_mask;
+	u32 nentries;
+	u32 prod_head;
+	u32 prod_tail;
+	u32 cons_head;
+	u32 cons_tail;
+	struct xdp_ring *ring;
+	u64 invalid_descs;
 };
 
-int xdp_umem_reg(struct xdp_umem *umem, struct xdp_umem_reg *mr);
-void xdp_put_umem(struct xdp_umem *umem);
-int xdp_umem_create(struct xdp_umem **umem);
+struct xsk_queue *xskq_create(u32 nentries);
+void xskq_destroy(struct xsk_queue *q);
 
-#endif /* XDP_UMEM_H_ */
+#endif /* _LINUX_XSK_QUEUE_H */
