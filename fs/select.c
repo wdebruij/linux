@@ -49,10 +49,14 @@
 
 #define MAX_SLACK	(100 * NSEC_PER_MSEC)
 
-static long __estimate_accuracy(struct timespec64 *tv)
+u64 select_estimate_accuracy(struct timespec64 *tv)
 {
 	long slack;
 	int divfactor = 1000;
+
+	/* Realtime tasks get a slack of 0 for obvious reasons. */
+	if (rt_task(current))
+		return 0;
 
 	if (tv->tv_sec < 0)
 		return 0;
@@ -69,30 +73,8 @@ static long __estimate_accuracy(struct timespec64 *tv)
 	if (slack > MAX_SLACK)
 		return MAX_SLACK;
 
-	return slack;
+	return max_t(u64, slack, current->timer_slack_ns);
 }
-
-u64 select_estimate_accuracy(struct timespec64 *tv)
-{
-	u64 ret;
-	struct timespec64 now;
-
-	/*
-	 * Realtime tasks get a slack of 0 for obvious reasons.
-	 */
-
-	if (rt_task(current))
-		return 0;
-
-	ktime_get_ts64(&now);
-	now = timespec64_sub(*tv, now);
-	ret = __estimate_accuracy(&now);
-	if (ret < current->timer_slack_ns)
-		return current->timer_slack_ns;
-	return ret;
-}
-
-
 
 struct poll_table_page {
 	struct poll_table_page * next;
@@ -264,13 +246,15 @@ static int poll_schedule_timeout(struct poll_wqueues *pwq, int state,
  * @to:		pointer to timespec64 variable for the final timeout
  * @sec:	seconds (from user space)
  * @nsec:	nanoseconds (from user space)
+ * @slack:	pointer to slack to later pass to schedule_hrtimeout_range
  *
  * Note, we do not use a timespec for the user space value here, That
  * way we can use the function for timeval and compat interfaces as well.
  *
  * Returns -EINVAL if sec/nsec are not normalized. Otherwise 0.
  */
-int poll_select_set_timeout(struct timespec64 *to, time64_t sec, long nsec)
+int poll_select_set_timeout(struct timespec64 *to, time64_t sec, long nsec,
+			    u64 *slack)
 {
 	struct timespec64 ts = {.tv_sec = sec, .tv_nsec = nsec};
 
@@ -281,6 +265,7 @@ int poll_select_set_timeout(struct timespec64 *to, time64_t sec, long nsec)
 	if (!sec && !nsec) {
 		to->tv_sec = to->tv_nsec = 0;
 	} else {
+		*slack = select_estimate_accuracy(&ts);
 		ktime_get_ts64(to);
 		*to = timespec64_add_safe(*to, ts);
 	}
@@ -473,13 +458,13 @@ static inline void wait_key_set(poll_table *wait, unsigned long in,
 		wait->_key |= POLLOUT_SET;
 }
 
-static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
+static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time,
+		     u64 slack)
 {
 	ktime_t expire, *to = NULL;
 	struct poll_wqueues table;
 	poll_table *wait;
 	int retval, i, timed_out = 0;
-	u64 slack = 0;
 	__poll_t busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
 	unsigned long busy_start = 0;
 
@@ -497,9 +482,6 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 		wait->_qproc = NULL;
 		timed_out = 1;
 	}
-
-	if (end_time && !timed_out)
-		slack = select_estimate_accuracy(end_time);
 
 	retval = 0;
 	for (;;) {
@@ -619,7 +601,8 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
  * I'm trying ERESTARTNOHAND which restart only when you want to.
  */
 int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
-			   fd_set __user *exp, struct timespec64 *end_time)
+			   fd_set __user *exp, struct timespec64 *end_time,
+			   u64 slack)
 {
 	fd_set_bits fds;
 	void *bits;
@@ -674,7 +657,7 @@ int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
 	zero_fd_set(n, fds.res_out);
 	zero_fd_set(n, fds.res_ex);
 
-	ret = do_select(n, &fds, end_time);
+	ret = do_select(n, &fds, end_time, slack);
 
 	if (ret < 0)
 		goto out;
@@ -702,6 +685,7 @@ static int kern_select(int n, fd_set __user *inp, fd_set __user *outp,
 {
 	struct timespec64 end_time, *to = NULL;
 	struct __kernel_old_timeval tv;
+	u64 slack = 0;
 	int ret;
 
 	if (tvp) {
@@ -711,11 +695,12 @@ static int kern_select(int n, fd_set __user *inp, fd_set __user *outp,
 		to = &end_time;
 		if (poll_select_set_timeout(to,
 				tv.tv_sec + (tv.tv_usec / USEC_PER_SEC),
-				(tv.tv_usec % USEC_PER_SEC) * NSEC_PER_USEC))
+				(tv.tv_usec % USEC_PER_SEC) * NSEC_PER_USEC,
+				&slack))
 			return -EINVAL;
 	}
 
-	ret = core_sys_select(n, inp, outp, exp, to);
+	ret = core_sys_select(n, inp, outp, exp, to, slack);
 	return poll_select_finish(&end_time, tvp, PT_TIMEVAL, ret);
 }
 
@@ -731,6 +716,7 @@ static long do_pselect(int n, fd_set __user *inp, fd_set __user *outp,
 		       enum poll_time_type type)
 {
 	struct timespec64 ts, end_time, *to = NULL;
+	u64 slack = 0;
 	int ret;
 
 	if (tsp) {
@@ -748,7 +734,7 @@ static long do_pselect(int n, fd_set __user *inp, fd_set __user *outp,
 		}
 
 		to = &end_time;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
@@ -756,7 +742,7 @@ static long do_pselect(int n, fd_set __user *inp, fd_set __user *outp,
 	if (ret)
 		return ret;
 
-	ret = core_sys_select(n, inp, outp, exp, to);
+	ret = core_sys_select(n, inp, outp, exp, to, slack);
 	return poll_select_finish(&end_time, tsp, type, ret);
 }
 
@@ -879,12 +865,11 @@ out:
 }
 
 static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
-		   struct timespec64 *end_time)
+		   struct timespec64 *end_time, u64 slack)
 {
 	poll_table* pt = &wait->pt;
 	ktime_t expire, *to = NULL;
 	int timed_out = 0, count = 0;
-	u64 slack = 0;
 	__poll_t busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
 	unsigned long busy_start = 0;
 
@@ -893,9 +878,6 @@ static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
 		pt->_qproc = NULL;
 		timed_out = 1;
 	}
-
-	if (end_time && !timed_out)
-		slack = select_estimate_accuracy(end_time);
 
 	for (;;) {
 		struct poll_list *walk;
@@ -968,7 +950,7 @@ static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
 			sizeof(struct pollfd))
 
 static int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds,
-		struct timespec64 *end_time)
+		       struct timespec64 *end_time, u64 slack)
 {
 	struct poll_wqueues table;
 	int err = -EFAULT, fdcount, len;
@@ -1008,7 +990,7 @@ static int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds,
 	}
 
 	poll_initwait(&table);
-	fdcount = do_poll(head, &table, end_time);
+	fdcount = do_poll(head, &table, end_time, slack);
 	poll_freewait(&table);
 
 	for (walk = head; walk; walk = walk->next) {
@@ -1037,15 +1019,17 @@ static long do_restart_poll(struct restart_block *restart_block)
 	struct pollfd __user *ufds = restart_block->poll.ufds;
 	int nfds = restart_block->poll.nfds;
 	struct timespec64 *to = NULL, end_time;
+	u64 slack = 0;
 	int ret;
 
 	if (restart_block->poll.has_timeout) {
 		end_time.tv_sec = restart_block->poll.tv_sec;
 		end_time.tv_nsec = restart_block->poll.tv_nsec;
 		to = &end_time;
+		slack = select_estimate_accuracy(to);
 	}
 
-	ret = do_sys_poll(ufds, nfds, to);
+	ret = do_sys_poll(ufds, nfds, to, slack);
 
 	if (ret == -ERESTARTNOHAND) {
 		restart_block->fn = do_restart_poll;
@@ -1058,15 +1042,17 @@ SYSCALL_DEFINE3(poll, struct pollfd __user *, ufds, unsigned int, nfds,
 		int, timeout_msecs)
 {
 	struct timespec64 end_time, *to = NULL;
+	u64 slack = 0;
 	int ret;
 
 	if (timeout_msecs >= 0) {
 		to = &end_time;
 		poll_select_set_timeout(to, timeout_msecs / MSEC_PER_SEC,
-			NSEC_PER_MSEC * (timeout_msecs % MSEC_PER_SEC));
+			NSEC_PER_MSEC * (timeout_msecs % MSEC_PER_SEC),
+			&slack);
 	}
 
-	ret = do_sys_poll(ufds, nfds, to);
+	ret = do_sys_poll(ufds, nfds, to, slack);
 
 	if (ret == -ERESTARTNOHAND) {
 		struct restart_block *restart_block;
@@ -1093,6 +1079,7 @@ SYSCALL_DEFINE5(ppoll, struct pollfd __user *, ufds, unsigned int, nfds,
 		size_t, sigsetsize)
 {
 	struct timespec64 ts, end_time, *to = NULL;
+	u64 slack = 0;
 	int ret;
 
 	if (tsp) {
@@ -1100,7 +1087,7 @@ SYSCALL_DEFINE5(ppoll, struct pollfd __user *, ufds, unsigned int, nfds,
 			return -EFAULT;
 
 		to = &end_time;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
@@ -1108,7 +1095,7 @@ SYSCALL_DEFINE5(ppoll, struct pollfd __user *, ufds, unsigned int, nfds,
 	if (ret)
 		return ret;
 
-	ret = do_sys_poll(ufds, nfds, to);
+	ret = do_sys_poll(ufds, nfds, to, slack);
 	return poll_select_finish(&end_time, tsp, PT_TIMESPEC, ret);
 }
 
@@ -1119,6 +1106,7 @@ SYSCALL_DEFINE5(ppoll_time32, struct pollfd __user *, ufds, unsigned int, nfds,
 		size_t, sigsetsize)
 {
 	struct timespec64 ts, end_time, *to = NULL;
+	u64 slack = 0;
 	int ret;
 
 	if (tsp) {
@@ -1126,7 +1114,7 @@ SYSCALL_DEFINE5(ppoll_time32, struct pollfd __user *, ufds, unsigned int, nfds,
 			return -EFAULT;
 
 		to = &end_time;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
@@ -1134,7 +1122,7 @@ SYSCALL_DEFINE5(ppoll_time32, struct pollfd __user *, ufds, unsigned int, nfds,
 	if (ret)
 		return ret;
 
-	ret = do_sys_poll(ufds, nfds, to);
+	ret = do_sys_poll(ufds, nfds, to, slack);
 	return poll_select_finish(&end_time, tsp, PT_OLD_TIMESPEC, ret);
 }
 #endif
@@ -1183,7 +1171,7 @@ int compat_set_fd_set(unsigned long nr, compat_ulong_t __user *ufdset,
  */
 static int compat_core_sys_select(int n, compat_ulong_t __user *inp,
 	compat_ulong_t __user *outp, compat_ulong_t __user *exp,
-	struct timespec64 *end_time)
+	struct timespec64 *end_time, u64 slack)
 {
 	fd_set_bits fds;
 	void *bits;
@@ -1230,7 +1218,7 @@ static int compat_core_sys_select(int n, compat_ulong_t __user *inp,
 	zero_fd_set(n, fds.res_out);
 	zero_fd_set(n, fds.res_ex);
 
-	ret = do_select(n, &fds, end_time);
+	ret = do_select(n, &fds, end_time, slack);
 
 	if (ret < 0)
 		goto out;
@@ -1258,6 +1246,7 @@ static int do_compat_select(int n, compat_ulong_t __user *inp,
 {
 	struct timespec64 end_time, *to = NULL;
 	struct old_timeval32 tv;
+	u64 slack;
 	int ret;
 
 	if (tvp) {
@@ -1267,11 +1256,12 @@ static int do_compat_select(int n, compat_ulong_t __user *inp,
 		to = &end_time;
 		if (poll_select_set_timeout(to,
 				tv.tv_sec + (tv.tv_usec / USEC_PER_SEC),
-				(tv.tv_usec % USEC_PER_SEC) * NSEC_PER_USEC))
+				(tv.tv_usec % USEC_PER_SEC) * NSEC_PER_USEC,
+				&slack))
 			return -EINVAL;
 	}
 
-	ret = compat_core_sys_select(n, inp, outp, exp, to);
+	ret = compat_core_sys_select(n, inp, outp, exp, to, slack);
 	return poll_select_finish(&end_time, tvp, PT_OLD_TIMEVAL, ret);
 }
 
@@ -1306,6 +1296,7 @@ static long do_compat_pselect(int n, compat_ulong_t __user *inp,
 	compat_size_t sigsetsize, enum poll_time_type type)
 {
 	struct timespec64 ts, end_time, *to = NULL;
+	u64 slack = 0;
 	int ret;
 
 	if (tsp) {
@@ -1323,7 +1314,7 @@ static long do_compat_pselect(int n, compat_ulong_t __user *inp,
 		}
 
 		to = &end_time;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
@@ -1331,7 +1322,7 @@ static long do_compat_pselect(int n, compat_ulong_t __user *inp,
 	if (ret)
 		return ret;
 
-	ret = compat_core_sys_select(n, inp, outp, exp, to);
+	ret = compat_core_sys_select(n, inp, outp, exp, to, slack);
 	return poll_select_finish(&end_time, tsp, type, ret);
 }
 
@@ -1391,6 +1382,7 @@ COMPAT_SYSCALL_DEFINE5(ppoll_time32, struct pollfd __user *, ufds,
 	const compat_sigset_t __user *, sigmask, compat_size_t, sigsetsize)
 {
 	struct timespec64 ts, end_time, *to = NULL;
+	u64 slack = 0;
 	int ret;
 
 	if (tsp) {
@@ -1398,7 +1390,7 @@ COMPAT_SYSCALL_DEFINE5(ppoll_time32, struct pollfd __user *, ufds,
 			return -EFAULT;
 
 		to = &end_time;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
@@ -1406,7 +1398,7 @@ COMPAT_SYSCALL_DEFINE5(ppoll_time32, struct pollfd __user *, ufds,
 	if (ret)
 		return ret;
 
-	ret = do_sys_poll(ufds, nfds, to);
+	ret = do_sys_poll(ufds, nfds, to, slack);
 	return poll_select_finish(&end_time, tsp, PT_OLD_TIMESPEC, ret);
 }
 #endif
@@ -1417,6 +1409,7 @@ COMPAT_SYSCALL_DEFINE5(ppoll_time64, struct pollfd __user *, ufds,
 	const compat_sigset_t __user *, sigmask, compat_size_t, sigsetsize)
 {
 	struct timespec64 ts, end_time, *to = NULL;
+	u64 slack = 0;
 	int ret;
 
 	if (tsp) {
@@ -1424,7 +1417,7 @@ COMPAT_SYSCALL_DEFINE5(ppoll_time64, struct pollfd __user *, ufds,
 			return -EFAULT;
 
 		to = &end_time;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
@@ -1432,7 +1425,7 @@ COMPAT_SYSCALL_DEFINE5(ppoll_time64, struct pollfd __user *, ufds,
 	if (ret)
 		return ret;
 
-	ret = do_sys_poll(ufds, nfds, to);
+	ret = do_sys_poll(ufds, nfds, to, slack);
 	return poll_select_finish(&end_time, tsp, PT_TIMESPEC, ret);
 }
 

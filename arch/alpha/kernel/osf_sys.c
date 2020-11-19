@@ -1037,6 +1037,8 @@ SYSCALL_DEFINE5(osf_select, int, n, fd_set __user *, inp, fd_set __user *, outp,
 		fd_set __user *, exp, struct timeval32 __user *, tvp)
 {
 	struct timespec64 end_time, *to = NULL;
+	u64 slack = 0;
+
 	if (tvp) {
 		struct timespec64 tv;
 		to = &end_time;
@@ -1047,13 +1049,13 @@ SYSCALL_DEFINE5(osf_select, int, n, fd_set __user *, inp, fd_set __user *, outp,
 		if (tv.tv_sec < 0 || tv.tv_nsec < 0)
 			return -EINVAL;
 
-		if (poll_select_set_timeout(to, tv.tv_sec, tv.tv_nsec))
+		if (poll_select_set_timeout(to, tv.tv_sec, tv.tv_nsec, &slack))
 			return -EINVAL;		
 
 	}
 
 	/* OSF does not copy back the remaining time.  */
-	return core_sys_select(n, inp, outp, exp, to);
+	return core_sys_select(n, inp, outp, exp, to, slack);
 }
 
 struct rusage32 {

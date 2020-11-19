@@ -2679,10 +2679,11 @@ static int do_recvmmsg(int fd, struct mmsghdr __user *mmsg,
 	struct msghdr msg_sys;
 	struct timespec64 end_time;
 	struct timespec64 timeout64;
+	u64 unused;
 
 	if (timeout &&
 	    poll_select_set_timeout(&end_time, timeout->tv_sec,
-				    timeout->tv_nsec))
+				    timeout->tv_nsec, &unused))
 		return -EINVAL;
 
 	datagrams = 0;
