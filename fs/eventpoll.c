@@ -1837,7 +1837,13 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 	lockdep_assert_irqs_enabled();
 
 	if (timeout && (timeout->tv_sec | timeout->tv_nsec)) {
-		slack = select_estimate_accuracy(timeout);
+		struct timespec64 reltime;
+
+		/* temporary: will be removed in follow-on patch */
+		ktime_get_ts64(&reltime);
+		reltime = timespec64_sub(*timeout, reltime);
+
+		slack = select_estimate_accuracy(&reltime);
 		to = &expires;
 		*to = timespec64_to_ktime(*timeout);
 	} else if (timeout) {
@@ -2386,12 +2392,13 @@ SYSCALL_DEFINE6(epoll_pwait2, int, epfd, struct epoll_event __user *, events,
 		const sigset_t __user *, sigmask, size_t, sigsetsize)
 {
 	struct timespec64 ts, *to = NULL;
+	u64 slack = 0;
 
 	if (timeout) {
 		if (get_timespec64(&ts, timeout))
 			return -EFAULT;
 		to = &ts;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
@@ -2443,12 +2450,13 @@ COMPAT_SYSCALL_DEFINE6(epoll_pwait2, int, epfd,
 		       compat_size_t, sigsetsize)
 {
 	struct timespec64 ts, *to = NULL;
+	u64 slack = 0;
 
 	if (timeout) {
 		if (get_timespec64(&ts, timeout))
 			return -EFAULT;
 		to = &ts;
-		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+		if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec, &slack))
 			return -EINVAL;
 	}
 
