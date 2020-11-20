@@ -1787,7 +1787,8 @@ static int ep_send_events(struct eventpoll *ep,
 	return esed.res;
 }
 
-static struct timespec64 *ep_timeout_to_timespec(struct timespec64 *to, long ms)
+static struct timespec64 *ep_timeout_to_timespec(struct timespec64 *to, long ms,
+						 u64 *slack)
 {
 	struct timespec64 now;
 	u32 rem;
@@ -1803,6 +1804,8 @@ static struct timespec64 *ep_timeout_to_timespec(struct timespec64 *to, long ms)
 
 	to->tv_sec = div_u64_rem(ms, MSEC_PER_SEC, &rem);
 	to->tv_nsec = NSEC_PER_MSEC * rem;
+
+	*slack = select_estimate_accuracy(to);
 
 	ktime_get_ts64(&now);
 	*to = timespec64_add_safe(now, *to);
@@ -1822,28 +1825,21 @@ static struct timespec64 *ep_timeout_to_timespec(struct timespec64 *to, long ms)
  *           while if the @timeout ptr is NULL, the function will block
  *           until at least one event has been retrieved (or an error
  *           occurred).
+ * @slack: pointer to slack to later pass to schedule_hrtimeout_range
  *
  * Returns: Returns the number of ready events which have been fetched, or an
  *          error code, in case of error.
  */
 static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
-		   int maxevents, struct timespec64 *timeout)
+		   int maxevents, struct timespec64 *timeout, u64 slack)
 {
 	int res = 0, eavail, timed_out = 0;
-	u64 slack = 0;
 	wait_queue_entry_t wait;
 	ktime_t expires, *to = NULL;
 
 	lockdep_assert_irqs_enabled();
 
 	if (timeout && (timeout->tv_sec | timeout->tv_nsec)) {
-		struct timespec64 reltime;
-
-		/* temporary: will be removed in follow-on patch */
-		ktime_get_ts64(&reltime);
-		reltime = timespec64_sub(*timeout, reltime);
-
-		slack = select_estimate_accuracy(&reltime);
 		to = &expires;
 		*to = timespec64_to_ktime(*timeout);
 	} else if (timeout) {
@@ -2301,7 +2297,7 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
  * part of the user space epoll_wait(2).
  */
 static int do_epoll_wait(int epfd, struct epoll_event __user *events,
-			 int maxevents, struct timespec64 *to)
+			 int maxevents, struct timespec64 *to, u64 slack)
 {
 	int error;
 	struct fd f;
@@ -2335,7 +2331,7 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 	ep = f.file->private_data;
 
 	/* Time to fish for events ... */
-	error = ep_poll(ep, events, maxevents, to);
+	error = ep_poll(ep, events, maxevents, to, slack);
 
 error_fput:
 	fdput(f);
@@ -2345,10 +2341,11 @@ error_fput:
 SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
 		int, maxevents, int, timeout)
 {
-	struct timespec64 to;
+	struct timespec64 ts, *to;
+	u64 slack;
 
-	return do_epoll_wait(epfd, events, maxevents,
-			     ep_timeout_to_timespec(&to, timeout));
+	to = ep_timeout_to_timespec(&ts, timeout, &slack);
+	return do_epoll_wait(epfd, events, maxevents, to, slack);
 }
 
 /*
@@ -2357,7 +2354,8 @@ SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
  */
 static int do_epoll_pwait(int epfd, struct epoll_event __user *events,
 			  int maxevents, struct timespec64 *to,
-			  const sigset_t __user *sigmask, size_t sigsetsize)
+			  const sigset_t __user *sigmask, size_t sigsetsize,
+			  u64 slack)
 {
 	int error;
 
@@ -2369,7 +2367,7 @@ static int do_epoll_pwait(int epfd, struct epoll_event __user *events,
 	if (error)
 		return error;
 
-	error = do_epoll_wait(epfd, events, maxevents, to);
+	error = do_epoll_wait(epfd, events, maxevents, to, slack);
 
 	restore_saved_sigmask_unless(error == -EINTR);
 
@@ -2380,11 +2378,12 @@ SYSCALL_DEFINE6(epoll_pwait, int, epfd, struct epoll_event __user *, events,
 		int, maxevents, int, timeout, const sigset_t __user *, sigmask,
 		size_t, sigsetsize)
 {
-	struct timespec64 to;
+	struct timespec64 ts, *to;
+	u64 slack = 0;
 
-	return do_epoll_pwait(epfd, events, maxevents,
-			      ep_timeout_to_timespec(&to, timeout),
-			      sigmask, sigsetsize);
+	to = ep_timeout_to_timespec(&ts, timeout, &slack);
+	return do_epoll_pwait(epfd, events, maxevents, to,
+			      sigmask, sigsetsize, slack);
 }
 
 SYSCALL_DEFINE6(epoll_pwait2, int, epfd, struct epoll_event __user *, events,
@@ -2403,14 +2402,14 @@ SYSCALL_DEFINE6(epoll_pwait2, int, epfd, struct epoll_event __user *, events,
 	}
 
 	return do_epoll_pwait(epfd, events, maxevents, to,
-			      sigmask, sigsetsize);
+			      sigmask, sigsetsize, slack);
 }
 
 #ifdef CONFIG_COMPAT
 static int do_compat_epoll_pwait(int epfd, struct epoll_event __user *events,
 				 int maxevents, struct timespec64 *timeout,
 				 const compat_sigset_t __user *sigmask,
-				 compat_size_t sigsetsize)
+				 compat_size_t sigsetsize, u64 slack)
 {
 	long err;
 
@@ -2422,7 +2421,7 @@ static int do_compat_epoll_pwait(int epfd, struct epoll_event __user *events,
 	if (err)
 		return err;
 
-	err = do_epoll_wait(epfd, events, maxevents, timeout);
+	err = do_epoll_wait(epfd, events, maxevents, timeout, slack);
 
 	restore_saved_sigmask_unless(err == -EINTR);
 
@@ -2435,11 +2434,12 @@ COMPAT_SYSCALL_DEFINE6(epoll_pwait, int, epfd,
 		       const compat_sigset_t __user *, sigmask,
 		       compat_size_t, sigsetsize)
 {
-	struct timespec64 to;
+	struct timespec64 ts, *to;
+	u64 slack;
 
-	return do_compat_epoll_pwait(epfd, events, maxevents,
-				     ep_timeout_to_timespec(&to, timeout),
-				     sigmask, sigsetsize);
+	to = ep_timeout_to_timespec(&ts, timeout, &slack);
+	return do_compat_epoll_pwait(epfd, events, maxevents, to,
+				     sigmask, sigsetsize, slack);
 }
 
 COMPAT_SYSCALL_DEFINE6(epoll_pwait2, int, epfd,
@@ -2461,7 +2461,7 @@ COMPAT_SYSCALL_DEFINE6(epoll_pwait2, int, epfd,
 	}
 
 	return do_compat_epoll_pwait(epfd, events, maxevents, to,
-				     sigmask, sigsetsize);
+				     sigmask, sigsetsize, slack);
 }
 
 #endif
