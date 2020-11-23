@@ -1683,6 +1683,7 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	size_t total_len = iov_iter_count(from);
 	size_t len = total_len, align = tun->align, linear;
 	struct virtio_net_hdr gso = { 0 };
+	struct virtio_net_hdr_v12 hdr_12;
 	struct tun_pcpu_stats *stats;
 	int good_linear;
 	int copylen;
@@ -1691,6 +1692,7 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	u32 rxhash = 0;
 	int skb_xdp = 1;
 	bool frags = tun_napi_frags_enabled(tfile);
+	u64 tstamp = 0;
 
 	if (!(tun->flags & IFF_NO_PI)) {
 		if (len < sizeof(pi))
@@ -1703,13 +1705,16 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 
 	if (tun->flags & IFF_VNET_HDR) {
 		int vnet_hdr_sz = READ_ONCE(tun->vnet_hdr_sz);
+		int copylen = min_t(int, vnet_hdr_sz, sizeof(hdr_12));
 
 		if (len < vnet_hdr_sz)
 			return -EINVAL;
 		len -= vnet_hdr_sz;
 
-		if (!copy_from_iter_full(&gso, sizeof(gso), from))
+		if (!copy_from_iter_full(&hdr_12, copylen, from))
 			return -EFAULT;
+
+		memcpy(&gso, &hdr_12, sizeof(gso));
 
 		if ((gso.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) &&
 		    tun16_to_cpu(tun, gso.csum_start) + tun16_to_cpu(tun, gso.csum_offset) + 2 > tun16_to_cpu(tun, gso.hdr_len))
@@ -1717,7 +1722,18 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 
 		if (tun16_to_cpu(tun, gso.hdr_len) > len)
 			return -EINVAL;
-		iov_iter_advance(from, vnet_hdr_sz - sizeof(gso));
+
+		/* TODO: by size is not a safe test */
+		if (vnet_hdr_sz >= sizeof(struct virtio_net_hdr_v1_hash) &&
+		    hdr_12.hash.report == VIRTIO_NET_HASH_REPORT_L4)
+			rxhash = __virtio32_to_cpu(tun_is_little_endian(tun),
+						   hdr_12.hash.value);
+
+		if (vnet_hdr_sz >= sizeof(struct virtio_net_hdr_v12))
+			tstamp = __virtio64_to_cpu(tun_is_little_endian(tun),
+						   hdr_12.tstamp);
+
+		iov_iter_advance(from, vnet_hdr_sz - copylen);
 	}
 
 	if ((tun->flags & TUN_TYPE_MASK) == IFF_TAP) {
@@ -1816,6 +1832,12 @@ drop:
 
 		return -EINVAL;
 	}
+
+	if (rxhash) {
+		skb_set_hash(skb, rxhash, PKT_HASH_TYPE_L4);
+		rxhash = 0;
+	}
+	skb->tstamp = tstamp;
 
 	switch (tun->flags & TUN_TYPE_MASK) {
 	case IFF_TUN:
@@ -2045,6 +2067,7 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 	}
 
 	if (vnet_hdr_sz) {
+		struct virtio_net_hdr_v12 hdr_12;
 		struct virtio_net_hdr gso;
 
 		if (iov_iter_count(iter) < vnet_hdr_sz)
@@ -2066,10 +2089,12 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 			return -EINVAL;
 		}
 
-		if (copy_to_iter(&gso, sizeof(gso), iter) != sizeof(gso))
+		memset(&hdr_12, 0, sizeof(hdr_12));
+		memcpy(&hdr_12, &gso, sizeof(gso));
+		hdr_12.tstamp = __cpu_to_virtio64(tun_is_little_endian(tun),
+						  0xBEEF);
+		if (copy_to_iter(&hdr_12, vnet_hdr_sz, iter) != vnet_hdr_sz)
 			return -EFAULT;
-
-		iov_iter_advance(iter, vnet_hdr_sz - sizeof(gso));
 	}
 
 	if (vlan_hlen) {
