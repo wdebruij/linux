@@ -57,6 +57,7 @@
 					 * Steering */
 #define VIRTIO_NET_F_CTRL_MAC_ADDR 23	/* Set MAC address */
 
+#define VIRTIO_NET_F_RX_TSTAMP	  55	/* Host sends TAI receive time */
 #define VIRTIO_NET_F_TX_HASH	  56	/* Guest sends hash report */
 #define VIRTIO_NET_F_HASH_REPORT  57	/* Supports hash report */
 #define VIRTIO_NET_F_RSS	  60	/* Supports RSS RX steering */
@@ -180,6 +181,17 @@ struct virtio_net_hdr_v1_hash {
 #define VIRTIO_NET_HASH_STATE_TIMEOUT_BIT      0x1
 		__le16 hash_state;
 	};
+};
+
+struct virtio_net_hdr_v12 {
+	struct virtio_net_hdr_v1 hdr;
+	struct {
+		__le32 value;
+		__le16 report;
+		__le16 flow_state;
+	} hash;
+	__virtio32 reserved;
+	__virtio64 tstamp;
 };
 
 #ifndef VIRTIO_NET_NO_LEGACY
