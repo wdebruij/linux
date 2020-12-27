@@ -57,6 +57,7 @@
 					 * Steering */
 #define VIRTIO_NET_F_CTRL_MAC_ADDR 23	/* Set MAC address */
 
+#define VIRTIO_NET_F_TX_TSTAMP	  54	/* Guest sets TAI delivery time */
 #define VIRTIO_NET_F_RX_TSTAMP	  55	/* Host sends TAI receive time */
 #define VIRTIO_NET_F_TX_HASH	  56	/* Guest sends hash report */
 #define VIRTIO_NET_F_HASH_REPORT  57	/* Supports hash report */

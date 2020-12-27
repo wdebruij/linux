@@ -207,6 +207,9 @@ struct virtnet_info {
 	/* Host will pass CLOCK_TAI receive time to the guest */
 	bool has_rx_tstamp;
 
+	/* Guest will pass CLOCK_TAI delivery time to the host */
+	bool has_tx_tstamp;
+
 	/* Has control virtqueue */
 	bool has_cvq;
 
@@ -1550,7 +1553,7 @@ static int xmit_skb(struct send_queue *sq, struct sk_buff *skb)
 	struct virtio_net_hdr_mrg_rxbuf *hdr;
 	const unsigned char *dest = ((struct ethhdr *)skb->data)->h_dest;
 	struct virtnet_info *vi = sq->vq->vdev->priv;
-	struct virtio_net_hdr_v1_hash *ht;
+	struct virtio_net_hdr_v12 *h12;
 	int num_sg;
 	unsigned hdr_len = vi->hdr_len;
 	bool can_push;
@@ -1575,13 +1578,15 @@ static int xmit_skb(struct send_queue *sq, struct sk_buff *skb)
 	if (vi->mergeable_rx_bufs)
 		hdr->num_buffers = 0;
 
-	ht = (void *)hdr;
+	h12 = (void *)hdr;
 	if (vi->has_tx_hash) {
-		ht->hash_value = cpu_to_virtio32(vi->vdev, skb->hash);
-		ht->hash_report = skb->l4_hash ? VIRTIO_NET_HASH_REPORT_L4 :
-						 VIRTIO_NET_HASH_REPORT_OTHER;
-		ht->hash_state = VIRTIO_NET_HASH_STATE_DEFAULT;
+		h12->hash.value = cpu_to_virtio32(vi->vdev, skb->hash);
+		h12->hash.report = skb->l4_hash ? VIRTIO_NET_HASH_REPORT_L4 :
+						  VIRTIO_NET_HASH_REPORT_OTHER;
+		h12->hash.flow_state = VIRTIO_NET_HASH_STATE_DEFAULT;
 	}
+	if (vi->has_tx_tstamp)
+		h12->tstamp = cpu_to_virtio64(vi->vdev, skb->tstamp);
 
 	sg_init_table(sq->sg, skb_shinfo(skb)->nr_frags + (can_push ? 1 : 2));
 	if (can_push) {
@@ -3089,6 +3094,11 @@ static int virtnet_probe(struct virtio_device *vdev)
 		vi->hdr_len = sizeof(struct virtio_net_hdr_v12);
 	}
 
+	if (virtio_has_feature(vdev, VIRTIO_NET_F_TX_TSTAMP)) {
+		vi->has_tx_tstamp = true;
+		vi->hdr_len = sizeof(struct virtio_net_hdr_v12);
+	}
+
 	if (virtio_has_feature(vdev, VIRTIO_F_ANY_LAYOUT) ||
 	    virtio_has_feature(vdev, VIRTIO_F_VERSION_1))
 		vi->any_header_sg = true;
@@ -3279,7 +3289,7 @@ static struct virtio_device_id id_table[] = {
 	VIRTIO_NET_F_CTRL_MAC_ADDR, \
 	VIRTIO_NET_F_MTU, VIRTIO_NET_F_CTRL_GUEST_OFFLOADS, \
 	VIRTIO_NET_F_SPEED_DUPLEX, VIRTIO_NET_F_STANDBY, \
-	VIRTIO_NET_F_TX_HASH, VIRTIO_NET_F_RX_TSTAMP
+	VIRTIO_NET_F_TX_HASH, VIRTIO_NET_F_RX_TSTAMP, VIRTIO_NET_F_TX_TSTAMP
 
 static unsigned int features[] = {
 	VIRTNET_FEATURES,
