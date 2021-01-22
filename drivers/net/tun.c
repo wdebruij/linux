@@ -1643,6 +1643,7 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	size_t total_len = iov_iter_count(from);
 	size_t len = total_len, align = tun->align, linear;
 	struct virtio_net_hdr gso = { 0 };
+	struct virtio_net_hdr_hash_ts ht;
 	int good_linear;
 	int copylen;
 	bool zerocopy = false;
@@ -1650,6 +1651,7 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	u32 rxhash = 0;
 	int skb_xdp = 1;
 	bool frags = tun_napi_frags_enabled(tfile);
+	u64 tstamp = 0;
 
 	if (!(tun->flags & IFF_NO_PI)) {
 		if (len < sizeof(pi))
@@ -1662,13 +1664,16 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 
 	if (tun->flags & IFF_VNET_HDR) {
 		int vnet_hdr_sz = READ_ONCE(tun->vnet_hdr_sz);
+		int copylen = min_t(int, vnet_hdr_sz, sizeof(ht));
 
 		if (len < vnet_hdr_sz)
 			return -EINVAL;
 		len -= vnet_hdr_sz;
 
-		if (!copy_from_iter_full(&gso, sizeof(gso), from))
+		if (!copy_from_iter_full(&ht, copylen, from))
 			return -EFAULT;
+
+		memcpy(&gso, &ht, sizeof(gso));
 
 		if ((gso.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) &&
 		    tun16_to_cpu(tun, gso.csum_start) + tun16_to_cpu(tun, gso.csum_offset) + 2 > tun16_to_cpu(tun, gso.hdr_len))
@@ -1676,7 +1681,26 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 
 		if (tun16_to_cpu(tun, gso.hdr_len) > len)
 			return -EINVAL;
-		iov_iter_advance(from, vnet_hdr_sz - sizeof(gso));
+
+		/* NB: should be conditional on feature negotiation */
+		if (vnet_hdr_sz >= sizeof(struct virtio_net_hdr_v1_hash) &&
+		    tun16_to_cpu(tun, ht.hash.report) != VIRTIO_NET_HASH_REPORT_NONE)
+			rxhash = __le32_to_cpu(ht.hash.value);
+
+		if (vnet_hdr_sz >= sizeof(struct virtio_net_hdr_hash_ts)) {
+			/* NB: should be conditional on feature negotiation */
+			tstamp = __le64_to_cpu(ht.tstamp);
+			/* NB: should be conditional on feature negotiation */
+			if (ht.hdr.flags & VIRTIO_NET_HDR_F_TSTAMP) {
+				ht.tstamp = __cpu_to_le64(ktime_get_ns());
+				/* Gross hack: certainly not seriously suggesting this */
+				iov_iter_revert(from, sizeof(ht.tstamp));
+				if (!copy_to_iter(&ht.tstamp, sizeof(ht.tstamp), from))
+					iov_iter_advance(from, sizeof(ht.tstamp));
+			}
+		}
+
+		iov_iter_advance(from, vnet_hdr_sz - copylen);
 	}
 
 	if ((tun->flags & TUN_TYPE_MASK) == IFF_TAP) {
@@ -1775,6 +1799,12 @@ drop:
 
 		return -EINVAL;
 	}
+
+	if (rxhash) {
+		skb_set_hash(skb, rxhash, PKT_HASH_TYPE_L4);
+		rxhash = 0;
+	}
+	skb->tstamp = tstamp;
 
 	switch (tun->flags & TUN_TYPE_MASK) {
 	case IFF_TUN:
@@ -1994,6 +2024,7 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 	}
 
 	if (vnet_hdr_sz) {
+		struct virtio_net_hdr_hash_ts ht;
 		struct virtio_net_hdr gso;
 
 		if (iov_iter_count(iter) < vnet_hdr_sz)
@@ -2015,10 +2046,12 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 			return -EINVAL;
 		}
 
-		if (copy_to_iter(&gso, sizeof(gso), iter) != sizeof(gso))
+		memset(&ht, 0, sizeof(ht));
+		memcpy(&ht, &gso, sizeof(gso));
+		ht.hdr.flags |= VIRTIO_NET_HDR_F_TSTAMP;
+		ht.tstamp = __cpu_to_le64(ktime_get_ns());
+		if (copy_to_iter(&ht, vnet_hdr_sz, iter) != vnet_hdr_sz)
 			return -EFAULT;
-
-		iov_iter_advance(iter, vnet_hdr_sz - sizeof(gso));
 	}
 
 	if (vlan_hlen) {

@@ -73,7 +73,11 @@ enum {
 	VHOST_NET_FEATURES = VHOST_FEATURES |
 			 (1ULL << VHOST_NET_F_VIRTIO_NET_HDR) |
 			 (1ULL << VIRTIO_NET_F_MRG_RXBUF) |
-			 (1ULL << VIRTIO_F_ACCESS_PLATFORM)
+			 (1ULL << VIRTIO_F_ACCESS_PLATFORM) |
+			 (1ULL << VIRTIO_NET_F_TX_HASH) |
+			 (1ULL << VIRTIO_NET_F_RX_TSTAMP) |
+			 (1ULL << VIRTIO_NET_F_TX_TSTAMP) |
+			 (1ULL << VIRTIO_NET_F_TX_TIME)
 };
 
 enum {
@@ -774,7 +778,7 @@ static void handle_tx_copy(struct vhost_net *net, struct socket *sock)
 	size_t len, total_len = 0;
 	int err;
 	int sent_pkts = 0;
-	bool sock_can_batch = (sock->sk->sk_sndbuf == INT_MAX);
+	bool sock_can_batch = false;// (sock->sk->sk_sndbuf == INT_MAX);
 
 	do {
 		bool busyloop_intr = false;
@@ -1624,10 +1628,19 @@ static int vhost_net_set_features(struct vhost_net *n, u64 features)
 	size_t vhost_hlen, sock_hlen, hdr_len;
 	int i;
 
-	hdr_len = (features & ((1ULL << VIRTIO_NET_F_MRG_RXBUF) |
-			       (1ULL << VIRTIO_F_VERSION_1))) ?
-			sizeof(struct virtio_net_hdr_mrg_rxbuf) :
-			sizeof(struct virtio_net_hdr);
+	if (features & ((1ULL << VIRTIO_NET_F_RX_TSTAMP) |
+			(1ULL << VIRTIO_NET_F_TX_TSTAMP) |
+			(1ULL << VIRTIO_NET_F_TX_TIME)))
+		hdr_len = sizeof(struct virtio_net_hdr_hash_ts);
+	else if (features & ((1ULL << VIRTIO_NET_F_HASH_REPORT) |
+			     (1ULL << VIRTIO_NET_F_TX_HASH)))
+		hdr_len = sizeof(struct virtio_net_hdr_v1_hash);
+	else if (features & ((1ULL << VIRTIO_NET_F_MRG_RXBUF) |
+			     (1ULL << VIRTIO_F_VERSION_1)))
+		hdr_len = sizeof(struct virtio_net_hdr_mrg_rxbuf);
+	else
+		hdr_len = sizeof(struct virtio_net_hdr);
+
 	if (features & (1 << VHOST_NET_F_VIRTIO_NET_HDR)) {
 		/* vhost provides vnet_hdr */
 		vhost_hlen = hdr_len;
