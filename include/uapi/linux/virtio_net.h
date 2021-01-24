@@ -57,6 +57,7 @@
 					 * Steering */
 #define VIRTIO_NET_F_CTRL_MAC_ADDR 23	/* Set MAC address */
 
+#define VIRTIO_NET_F_RX_TSTAMP	  55	/* Device sends TAI receive time */
 #define VIRTIO_NET_F_TX_HASH	  56	/* Driver sends hash report */
 #define VIRTIO_NET_F_HASH_REPORT  57	/* Supports hash report */
 #define VIRTIO_NET_F_RSS	  60	/* Supports RSS RX steering */
@@ -126,6 +127,7 @@ struct virtio_net_hdr_v1 {
 #define VIRTIO_NET_HDR_F_NEEDS_CSUM	1	/* Use csum_start, csum_offset */
 #define VIRTIO_NET_HDR_F_DATA_VALID	2	/* Csum is valid */
 #define VIRTIO_NET_HDR_F_RSC_INFO	4	/* rsc info in csum_ fields */
+#define VIRTIO_NET_HDR_F_TSTAMP		8	/* timestamp is recorded */
 	__u8 flags;
 #define VIRTIO_NET_HDR_GSO_NONE		0	/* Not a GSO frame */
 #define VIRTIO_NET_HDR_GSO_TCPV4	1	/* GSO frame, IPv4 TCP (TSO) */
@@ -179,6 +181,17 @@ struct virtio_net_hdr_v1_hash {
 #define VIRTIO_NET_HASH_STATE_DEFAULT          0
 		__le16 hash_state;
 	};
+};
+
+struct virtio_net_hdr_hash_ts {
+	struct virtio_net_hdr_v1 hdr;
+	struct {
+		__le32 value;
+		__le16 report;
+		__le16 flow_state;
+	} hash;
+	__u32 reserved;
+	__le64 tstamp;
 };
 
 #ifndef VIRTIO_NET_NO_LEGACY
