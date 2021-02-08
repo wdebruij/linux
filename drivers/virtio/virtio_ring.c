@@ -238,7 +238,7 @@ static inline bool virtqueue_use_indirect(struct virtqueue *_vq,
  * unconditionally on data path.
  */
 
-static bool vring_use_dma_api(struct virtio_device *vdev)
+bool vring_use_dma_api(struct virtio_device *vdev)
 {
 	if (!virtio_has_dma_quirk(vdev))
 		return true;
@@ -257,6 +257,7 @@ static bool vring_use_dma_api(struct virtio_device *vdev)
 
 	return false;
 }
+EXPORT_SYMBOL_GPL(vring_use_dma_api);
 
 size_t virtio_max_dma_size(struct virtio_device *vdev)
 {
