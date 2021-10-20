@@ -2475,6 +2475,23 @@ found_ok_skb:
 					copied = -EFAULT;
 				break;
 			}
+		} else {
+			int i;
+
+			for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+				const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+				struct page *page = skb_frag_page(frag);
+
+				if (is_pci_p2pdma_page(page)) {
+					struct iovec iov = {
+						.iov_base = (void *) page_to_phys(page) + skb_frag_off(frag) -
+							    page->pgmap->range.start,
+						.iov_len = skb_frag_size(frag),
+					};
+
+					put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
+				}
+			}
 		}
 
 		WRITE_ONCE(*seq, *seq + used);

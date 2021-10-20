@@ -126,6 +126,8 @@
 
 #define SO_BUF_LOCK		72
 
+#define SO_DEVMEM_OFFSET	99
+
 #if !defined(__KERNEL__)
 
 #if __BITS_PER_LONG == 64 || (defined(__x86_64__) && defined(__ILP32__))
@@ -148,6 +150,7 @@
 #define SCM_TIMESTAMP           SO_TIMESTAMP
 #define SCM_TIMESTAMPNS         SO_TIMESTAMPNS
 #define SCM_TIMESTAMPING        SO_TIMESTAMPING
+#define SCM_DEVMEM_OFFSET	SO_DEVMEM_OFFSET
 
 #endif
 
