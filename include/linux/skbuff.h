@@ -3637,12 +3637,18 @@ struct sk_buff *skb_recv_datagram(struct sock *sk, unsigned flags, int noblock,
 				  int *err);
 __poll_t datagram_poll(struct file *file, struct socket *sock,
 			   struct poll_table_struct *wait);
-int skb_copy_datagram_iter(const struct sk_buff *from, int offset,
-			   struct iov_iter *to, int size);
+int __skb_copy_datagram_iter(const struct sk_buff *from, int offset,
+			   struct msghdr *msg, struct iov_iter *to, int size);
+static inline
+int skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
+			   struct iov_iter *to, int len)
+{
+	return __skb_copy_datagram_iter(skb, offset, NULL, to, len);
+}
 static inline int skb_copy_datagram_msg(const struct sk_buff *from, int offset,
 					struct msghdr *msg, int size)
 {
-	return skb_copy_datagram_iter(from, offset, &msg->msg_iter, size);
+	return __skb_copy_datagram_iter(from, offset, msg, &msg->msg_iter, size);
 }
 int skb_copy_and_csum_datagram_msg(struct sk_buff *skb, int hlen,
 				   struct msghdr *msg);

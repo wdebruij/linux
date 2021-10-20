@@ -61,6 +61,7 @@
 #include <net/tcp_states.h>
 #include <trace/events/skb.h>
 #include <net/busy_poll.h>
+#include <linux/pci.h>
 
 #include "datagram.h"
 
@@ -410,6 +411,7 @@ INDIRECT_CALLABLE_DECLARE(static size_t simple_copy_to_iter(const void *addr,
 						struct iov_iter *i));
 
 static int __skb_datagram_iter(const struct sk_buff *skb, int offset,
+			       struct msghdr *msg,
 			       struct iov_iter *to, int len, bool fault_short,
 			       size_t (*cb)(const void *, size_t, void *,
 					    struct iov_iter *), void *data)
@@ -441,17 +443,32 @@ static int __skb_datagram_iter(const struct sk_buff *skb, int offset,
 		end = start + skb_frag_size(frag);
 		if ((copy = end - offset) > 0) {
 			struct page *page = skb_frag_page(frag);
+			unsigned long pg_off;
+			int orig_copy = copy;
 			u8 *vaddr = kmap(page);
 
+			pg_off = skb_frag_off(frag) + offset - start;
 			if (copy > len)
 				copy = len;
 			n = INDIRECT_CALL_1(cb, simple_copy_to_iter,
-					vaddr + skb_frag_off(frag) + offset - start,
+					vaddr + pg_off,
 					copy, data, to);
 			kunmap(page);
 			offset += n;
 			if (n != copy)
 				goto short_copy;
+
+			if (is_pci_p2pdma_page(page)) {
+				struct iovec iov = {
+					.iov_base = (void *) page_to_phys(page) + pg_off -
+							     page->pgmap->range.start,
+					.iov_len = orig_copy,
+				};
+
+				put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET,
+					 sizeof(iov), &iov);
+			}
+
 			if (!(len -= copy))
 				return 0;
 		}
@@ -468,7 +485,7 @@ static int __skb_datagram_iter(const struct sk_buff *skb, int offset,
 			if (copy > len)
 				copy = len;
 			if (__skb_datagram_iter(frag_iter, offset - start,
-						to, copy, fault_short, cb, data))
+						msg, to, copy, fault_short, cb, data))
 				goto fault;
 			if ((len -= copy) == 0)
 				return 0;
@@ -508,7 +525,7 @@ int skb_copy_and_hash_datagram_iter(const struct sk_buff *skb, int offset,
 			   struct iov_iter *to, int len,
 			   struct ahash_request *hash)
 {
-	return __skb_datagram_iter(skb, offset, to, len, true,
+	return __skb_datagram_iter(skb, offset, NULL, to, len, true,
 			hash_and_copy_to_iter, hash);
 }
 EXPORT_SYMBOL(skb_copy_and_hash_datagram_iter);
@@ -526,15 +543,15 @@ static size_t simple_copy_to_iter(const void *addr, size_t bytes,
  *	@to: iovec iterator to copy to
  *	@len: amount of data to copy from buffer to iovec
  */
-int skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
+int __skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
+			   struct msghdr *msg,
 			   struct iov_iter *to, int len)
 {
 	trace_skb_copy_datagram_iovec(skb, len);
-	return __skb_datagram_iter(skb, offset, to, len, false,
+	return __skb_datagram_iter(skb, offset, msg, to, len, false,
 			simple_copy_to_iter, NULL);
 }
-EXPORT_SYMBOL(skb_copy_datagram_iter);
-
+EXPORT_SYMBOL(__skb_copy_datagram_iter);
 /**
  *	skb_copy_datagram_from_iter - Copy a datagram from an iov_iter.
  *	@skb: buffer to copy
@@ -724,7 +741,7 @@ static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 	struct csum_state csdata = { .csum = *csump };
 	int ret;
 
-	ret = __skb_datagram_iter(skb, offset, to, len, true,
+	ret = __skb_datagram_iter(skb, offset, NULL, to, len, true,
 				  csum_and_copy_to_iter, &csdata);
 	if (ret)
 		return ret;
