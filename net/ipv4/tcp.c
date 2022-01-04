@@ -2490,6 +2490,11 @@ found_ok_skb:
 					};
 
 					put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
+
+					/* pass raw physaddr, to return later to pci_free_p2pmem */
+					iov.iov_base = (void *)page_to_phys(page);
+					iov.iov_len = 0;	/* special marker value: this is a physaddr */
+					put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
 				}
 			}
 		}

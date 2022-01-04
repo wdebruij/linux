@@ -19,6 +19,8 @@
 #include <linux/random.h>
 #include <linux/seq_buf.h>
 #include <linux/xarray.h>
+#include <linux/genalloc.h>
+#include <linux/uio.h>
 
 enum pci_p2pdma_map_type {
 	PCI_P2PDMA_MAP_UNKNOWN = 0,
@@ -1012,3 +1014,35 @@ ssize_t pci_p2pdma_enable_show(char *page, struct pci_dev *p2p_dev,
 	return sprintf(page, "%s\n", pci_name(p2p_dev));
 }
 EXPORT_SYMBOL_GPL(pci_p2pdma_enable_show);
+
+int pci_free_p2pmem_iov(const struct iovec *iov)
+{
+	struct pci_dev *pdev;
+	struct page *pg;
+
+	if (iov->iov_len) {
+		printk("%s: ERR: len should be zero\n", __func__);
+		return -EINVAL;
+	}
+	if ((unsigned long) iov->iov_base & (PAGE_SIZE-1)) {
+		printk("%s: ERR: pointer not page-aligned\n", __func__);
+		return -EINVAL;
+	}
+
+	pg = pfn_to_page(__phys_to_pfn((unsigned long) iov->iov_base));
+	if (!pg)
+		return -EIO;
+	if (!is_pci_p2pdma_page(pg))
+		return -ENXIO;
+
+	if (!pg->pgmap) {
+		printk("ERR: unexpected missing ptr\n");
+		return -EINVAL;
+	}
+
+	pdev = to_p2p_pgmap(pg->pgmap)->provider;
+
+	pci_free_p2pmem(pdev, page_to_virt(pg), PAGE_SIZE);
+
+	return 0;
+}

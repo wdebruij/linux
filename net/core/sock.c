@@ -952,6 +952,8 @@ EXPORT_SYMBOL(sock_set_mark);
  *	at the socket level. Everything here is generic.
  */
 
+int pci_free_p2pmem_iov(const struct iovec *iov);
+
 int sock_setsockopt(struct socket *sock, int level, int optname,
 		    sockptr_t optval, unsigned int optlen)
 {
@@ -1366,6 +1368,25 @@ set_sndbuf:
 		sk->sk_userlocks = val | (sk->sk_userlocks &
 					  ~SOCK_BUF_LOCK_MASK);
 		break;
+
+#if IS_ENABLED(CONFIG_PCI_P2PDMA)
+	case SO_DEVMEM_OFFSET:
+	{
+		struct iovec iov;
+
+		/* TODO: support sending multiple iov at once */
+		if (optlen != sizeof(iov)) {
+			ret = -EINVAL;
+			break;
+		}
+		if (copy_from_sockptr(&iov, optval, sizeof(iov))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = pci_free_p2pmem_iov(&iov);
+	}
+	break;
+#endif
 
 	default:
 		ret = -ENOPROTOOPT;
