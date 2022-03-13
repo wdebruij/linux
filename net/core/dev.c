@@ -4680,6 +4680,39 @@ static struct netdev_rx_queue *netif_get_rxqueue(struct sk_buff *skb)
 	return rxqueue;
 }
 
+struct page * __netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
+				      int nid, gfp_t gfp_mask,
+				      unsigned int order)
+{
+	struct pci_dev *pdev;
+	void *kvirt;
+
+	rcu_read_lock();
+	pdev = rcu_dereference(rxq->p2pdma_dev);
+	if (pdev)
+		pci_dev_get(pdev);	/* TODO: avoid this expensive step */
+	rcu_read_unlock();
+
+	if (!pdev)
+		return __alloc_pages_node(nid, gfp_mask, order);
+
+	kvirt = pci_alloc_p2pmem(pdev, PAGE_SIZE);
+
+	/* TODO: assuming page alignment from genpool allocation is fragile.
+	 *       read the implementation to see whether this can be relied on.
+	 */
+	if (!PAGE_ALIGNED(kvirt)) {
+		net_info_ratelimited("p2pdma not page aligned");
+		pci_free_p2pmem(pdev, kvirt, PAGE_SIZE);
+		kvirt = NULL;
+	}
+
+	pci_dev_put(pdev);
+
+	return kvirt ? virt_to_page(kvirt) : NULL;
+}
+EXPORT_SYMBOL(__netdev_rxq_alloc_page);
+
 u32 bpf_prog_run_generic_xdp(struct sk_buff *skb, struct xdp_buff *xdp,
 			     struct bpf_prog *xdp_prog)
 {

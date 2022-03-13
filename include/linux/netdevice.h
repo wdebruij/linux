@@ -48,6 +48,8 @@
 #include <uapi/linux/pkt_cls.h>
 #include <linux/hashtable.h>
 #include <linux/rbtree.h>
+#include <linux/pci.h>
+#include <linux/pci-p2pdma.h>
 
 struct netpoll_info;
 struct device;
@@ -739,6 +741,32 @@ struct netdev_rx_queue {
 #endif
 	struct pci_dev __rcu		*p2pdma_dev;
 } ____cacheline_aligned_in_smp;
+
+struct page * __netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
+				      int nid, gfp_t gfp_mask,
+				      unsigned int order);
+
+static inline struct page * netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
+						  int nid, gfp_t gfp_mask,
+						  unsigned int order)
+{
+	/* TODO: static_branch this unlikely p2pdma path */
+	if (unlikely(rcu_access_pointer(rxq->p2pdma_dev)))
+		return __netdev_rxq_alloc_page(rxq, nid, gfp_mask, order);
+
+	return __alloc_pages_node(nid, gfp_mask, order);
+}
+
+static inline void netdev_rxq_free_page(struct page *pg)
+{
+	if (is_pci_p2pdma_page(pg)) {
+		/* pci_free_p2pmem */
+		net_info_ratelimited("p2pdma free (skipped)");
+		return;
+	}
+
+	__free_page(pg);
+}
 
 /*
  * RX queue sysfs structures and functions.

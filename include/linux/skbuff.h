@@ -3100,6 +3100,31 @@ static inline void __skb_frag_unref(skb_frag_t *frag, bool recycle)
 {
 	struct page *page = skb_frag_page(frag);
 
+	/* Do not call put_page on a page from a p2pdma genpool.
+	 *
+	 * This currently is a huge mem leak:
+	 *
+	 * It relies on setsockopt SO_DEVMEM_OFFSET to later release
+	 * the page to the genpool using pci_free_p2pmem_iov.
+	 *
+	 * But that
+	 * 1. only happens for payload pages passed to userspace with
+	 *    cmsg. Not, for instance, for a page backing initial SYN.
+	 *    Those are currently leaked.
+	 * 2. even for payload pages trusts a user process that may
+	 *    exit/crash at any time, or pass a wrong address, or pass
+	 *    the same address multiple times.
+	 * 3. does not refcount readers, assumes exactly one.
+	 *
+	 * Clearly this is ONLY ok for initial best-case benchmarking.
+	 *
+	 * First improvement is to release back to genpool unless a
+	 * previous put_cmsg in tcp_recvmsg expressly marked the page
+	 * as passed to user. That addresses SYN and similar cases.
+	 */
+	if (is_pci_p2pdma_page(page))
+		return;
+
 #ifdef CONFIG_PAGE_POOL
 	if (recycle && page_pool_return_skb_page(page))
 		return;
