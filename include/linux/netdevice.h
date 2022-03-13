@@ -737,6 +737,7 @@ struct netdev_rx_queue {
 #ifdef CONFIG_XDP_SOCKETS
 	struct xsk_buff_pool            *pool;
 #endif
+	struct pci_dev __rcu		*p2pdma_dev;
 } ____cacheline_aligned_in_smp;
 
 /*

@@ -23,6 +23,8 @@
 #include <linux/of.h>
 #include <linux/of_net.h>
 #include <linux/cpu.h>
+#include <linux/pci.h>
+#include <linux/pci-p2pdma.h>
 
 #include "net-sysfs.h"
 
@@ -933,11 +935,103 @@ static struct rx_queue_attribute rps_dev_flow_table_cnt_attribute __ro_after_ini
 		 show_rps_dev_flow_table_cnt, store_rps_dev_flow_table_cnt);
 #endif /* CONFIG_RPS */
 
+static ssize_t show_p2pdma_provider(struct netdev_rx_queue *queue, char *buf)
+{
+	struct pci_dev *pdev;
+	int ret;
+
+	rcu_read_lock();
+
+	pdev = rcu_dereference(queue->p2pdma_dev);
+	if (pdev) {
+		ret = scnprintf(buf, PAGE_SIZE, "%02hx:%02hx.%01hx\n",
+				pdev->bus->number,
+				PCI_SLOT(pdev->devfn),
+				PCI_FUNC(pdev->devfn));
+	} else {
+		ret = -ENXIO;
+	}
+
+	rcu_read_unlock();
+
+	return ret;
+}
+
+
+static ssize_t store_p2pdma_provider(struct netdev_rx_queue *queue,
+				     const char *buf, size_t len)
+{
+	static DEFINE_MUTEX(p2pdma_mutex);
+	unsigned long pci_bdf[3];
+	bool release_pdev = false;
+	struct pci_dev *pdev;
+	int ret;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	ret = sscanf(buf, "%hx:%hx.%hx", &pci_bdf[0], &pci_bdf[1], &pci_bdf[2]);
+	if (ret != 3)
+		return -EINVAL;
+
+	mutex_lock(&p2pdma_mutex);
+	pdev = rcu_dereference_protected(queue->p2pdma_dev,
+					 mutex_is_locked(&p2pdma_mutex));
+
+	if (pci_bdf[0] || pci_bdf[1] || pci_bdf[2]) {
+		if (pdev) {
+			ret = -EBUSY;
+			goto unlock;
+		}
+
+		pdev = pci_get_domain_bus_and_slot(0, pci_bdf[0],
+						   PCI_DEVFN(pci_bdf[1],
+							     pci_bdf[2]));
+		if (!pdev) {
+			ret = -ENODEV;
+			goto unlock;
+		}
+
+		if (!pci_has_p2pmem(pdev)) {
+			ret = -ENXIO;
+			goto unlock;
+		}
+
+		rcu_assign_pointer(queue->p2pdma_dev, pdev);
+		ret = len;
+	} else {
+		/* all-zeroes: disconnect */
+		if (!pdev) {
+			ret = -ENXIO;
+			goto unlock;
+		}
+
+		RCU_INIT_POINTER(queue->p2pdma_dev, NULL);
+		release_pdev = true;
+		ret = len;
+	}
+
+unlock:
+	mutex_unlock(&p2pdma_mutex);
+
+	if (release_pdev) {
+		synchronize_net();
+		pci_dev_put(pdev);
+	}
+
+	return ret;
+}
+
+static struct rx_queue_attribute p2pdma_provider_attribute __ro_after_init
+	= __ATTR(p2pdma_provider, 0644,
+		 show_p2pdma_provider, store_p2pdma_provider);
+
 static struct attribute *rx_queue_default_attrs[] __ro_after_init = {
 #ifdef CONFIG_RPS
 	&rps_cpus_attribute.attr,
 	&rps_dev_flow_table_cnt_attribute.attr,
 #endif
+	&p2pdma_provider_attribute.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(rx_queue_default);
