@@ -52,14 +52,19 @@
 
 static int mlx4_alloc_page(struct mlx4_en_priv *priv,
 			   struct mlx4_en_rx_alloc *frag,
-			   gfp_t gfp)
+			   gfp_t gfp, int ring_idx)
 {
 	struct page *page;
 	dma_addr_t dma;
 
-	page = alloc_page(gfp);
+	if (priv && priv->dev)
+		page = netdev_rxq_alloc_page(__netif_get_rx_queue(priv->dev, ring_idx), numa_node_id(), gfp, 0);
+	else
+		page = alloc_page(gfp);
 	if (unlikely(!page))
 		return -ENOMEM;
+
+/* TODO: replace dma with p2pdma */
 	dma = dma_map_page(priv->ddev, page, 0, PAGE_SIZE, priv->dma_dir);
 	if (unlikely(dma_mapping_error(priv->ddev, dma))) {
 		__free_page(page);
@@ -75,13 +80,13 @@ static int mlx4_en_alloc_frags(struct mlx4_en_priv *priv,
 			       struct mlx4_en_rx_ring *ring,
 			       struct mlx4_en_rx_desc *rx_desc,
 			       struct mlx4_en_rx_alloc *frags,
-			       gfp_t gfp)
+			       gfp_t gfp, int ring_idx)
 {
 	int i;
 
 	for (i = 0; i < priv->num_frags; i++, frags++) {
 		if (!frags->page) {
-			if (mlx4_alloc_page(priv, frags, gfp))
+			if (mlx4_alloc_page(priv, frags, gfp, ring_idx))
 				return -ENOMEM;
 			ring->rx_alloc_pages++;
 		}
@@ -97,7 +102,7 @@ static void mlx4_en_free_frag(const struct mlx4_en_priv *priv,
 	if (frag->page) {
 		dma_unmap_page(priv->ddev, frag->dma,
 			       PAGE_SIZE, priv->dma_dir);
-		__free_page(frag->page);
+		netdev_rxq_free_page(frag->page);
 	}
 	/* We need to clear all fields, otherwise a change of priv->log_rx_info
 	 * could lead to see garbage later in frag->page.
@@ -132,7 +137,7 @@ static void mlx4_en_init_rx_desc(const struct mlx4_en_priv *priv,
 
 static int mlx4_en_prepare_rx_desc(struct mlx4_en_priv *priv,
 				   struct mlx4_en_rx_ring *ring, int index,
-				   gfp_t gfp)
+				   gfp_t gfp, int ring_idx)
 {
 	struct mlx4_en_rx_desc *rx_desc = ring->buf +
 		(index << ring->log_stride);
@@ -151,7 +156,7 @@ static int mlx4_en_prepare_rx_desc(struct mlx4_en_priv *priv,
 		return 0;
 	}
 
-	return mlx4_en_alloc_frags(priv, ring, rx_desc, frags, gfp);
+	return mlx4_en_alloc_frags(priv, ring, rx_desc, frags, gfp, ring_idx);
 }
 
 static bool mlx4_en_is_ring_empty(const struct mlx4_en_rx_ring *ring)
@@ -193,7 +198,7 @@ static int mlx4_en_fill_rx_buffers(struct mlx4_en_priv *priv)
 
 			if (mlx4_en_prepare_rx_desc(priv, ring,
 						    ring->actual_size,
-						    GFP_KERNEL)) {
+						    GFP_KERNEL, ring_ind)) {
 				if (ring->actual_size < MLX4_EN_MIN_RX_SIZE) {
 					en_err(priv, "Failed to allocate enough rx buffers\n");
 					return -ENOMEM;
@@ -545,7 +550,8 @@ static void validate_loopback(struct mlx4_en_priv *priv, void *va)
 }
 
 static void mlx4_en_refill_rx_buffers(struct mlx4_en_priv *priv,
-				      struct mlx4_en_rx_ring *ring)
+				      struct mlx4_en_rx_ring *ring,
+				      int ring_idx)
 {
 	u32 missing = ring->actual_size - (ring->prod - ring->cons);
 
@@ -555,7 +561,8 @@ static void mlx4_en_refill_rx_buffers(struct mlx4_en_priv *priv,
 	do {
 		if (mlx4_en_prepare_rx_desc(priv, ring,
 					    ring->prod & ring->size_mask,
-					    GFP_ATOMIC | __GFP_MEMALLOC))
+					    (GFP_ATOMIC | __GFP_MEMALLOC),
+					    ring_idx))
 			break;
 		ring->prod++;
 	} while (likely(--missing));
@@ -908,7 +915,7 @@ next:
 		ring->cons = cq->mcq.cons_index;
 	}
 
-	mlx4_en_refill_rx_buffers(priv, ring);
+	mlx4_en_refill_rx_buffers(priv, ring, cq_ring);
 
 	return polled;
 }
