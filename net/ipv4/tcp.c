@@ -2485,14 +2485,15 @@ found_ok_skb:
 				if (is_pci_p2pdma_page(page)) {
 					struct iovec iov = {
 						.iov_base = (void *) page_to_phys(page) + skb_frag_off(frag) -
-							    page->pgmap->range.start,
+							    page->pgmap->range.start +
+							    page->pgmap->hack_align_off,
 						.iov_len = skb_frag_size(frag),
 					};
 
 					put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
 
 					/* pass raw physaddr, to return later to pci_free_p2pmem */
-					iov.iov_base = (void *)page_to_phys(page);
+					iov.iov_base = (void *)page_to_phys(page) + skb_frag_off(frag);
 					iov.iov_len = 0;	/* special marker value: this is a physaddr */
 					put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
 				}

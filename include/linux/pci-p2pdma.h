@@ -17,8 +17,12 @@ struct block_device;
 struct scatterlist;
 
 #ifdef CONFIG_PCI_P2PDMA
-int pci_p2pdma_add_resource(struct pci_dev *pdev, int bar, size_t size,
-		u64 offset);
+int __pci_p2pdma_add_resource(struct pci_dev *pdev, int bar, size_t size,
+		u64 offset, int hack_align_off);
+static inline int pci_p2pdma_add_resource(struct pci_dev *pdev, int bar, size_t size,
+		u64 offset) {
+	return __pci_p2pdma_add_resource(pdev, bar, size, offset, 0);
+}
 int pci_p2pdma_distance_many(struct pci_dev *provider, struct device **clients,
 			     int num_clients, bool verbose);
 bool pci_has_p2pmem(struct pci_dev *pdev);

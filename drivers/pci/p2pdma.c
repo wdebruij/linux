@@ -170,8 +170,8 @@ out:
  * The memory will be given ZONE_DEVICE struct pages so that it may
  * be used with any DMA request.
  */
-int pci_p2pdma_add_resource(struct pci_dev *pdev, int bar, size_t size,
-			    u64 offset)
+int __pci_p2pdma_add_resource(struct pci_dev *pdev, int bar, size_t size,
+			    u64 offset, int hack_align_off)
 {
 	struct pci_p2pdma_pagemap *p2p_pgmap;
 	struct dev_pagemap *pgmap;
@@ -205,6 +205,7 @@ int pci_p2pdma_add_resource(struct pci_dev *pdev, int bar, size_t size,
 	pgmap->range.start = pci_resource_start(pdev, bar) + offset;
 	pgmap->range.end = pgmap->range.start + size - 1;
 	pgmap->nr_range = 1;
+	pgmap->hack_align_off = hack_align_off;
 	pgmap->type = MEMORY_DEVICE_PCI_P2PDMA;
 
 	p2p_pgmap->provider = pdev;
@@ -236,7 +237,7 @@ pgmap_free:
 	devm_kfree(&pdev->dev, pgmap);
 	return error;
 }
-EXPORT_SYMBOL_GPL(pci_p2pdma_add_resource);
+EXPORT_SYMBOL_GPL(__pci_p2pdma_add_resource);
 
 /*
  * Note this function returns the parent PCI device with a

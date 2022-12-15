@@ -104,6 +104,7 @@ struct dev_pagemap_ops {
  *	instance.  Used by various helpers to make sure that no
  *	foreign ZONE_DEVICE memory is accessed.
  * @nr_range: number of ranges to be mapped
+ * @hack_align_off: account for offset due to aligning to 2MB section
  * @range: range to be mapped when nr_range == 1
  * @ranges: array of ranges to be mapped when nr_range > 1
  */
@@ -117,6 +118,7 @@ struct dev_pagemap {
 	const struct dev_pagemap_ops *ops;
 	void *owner;
 	int nr_range;
+	int hack_align_off;
 	union {
 		struct range range;
 		struct range ranges[0];
