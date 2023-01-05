@@ -2353,6 +2353,10 @@ int skb_copy_bits(const struct sk_buff *skb, int offset, void *to, int len)
 			skb_frag_foreach_page(f,
 					      skb_frag_off(f) + offset - start,
 					      copy, p, p_off, p_len, copied) {
+				if (is_pci_p2pdma_page(p)) {
+					printk(KERN_ERR "Mapping p2pdma page!");
+					dump_stack();
+				}
 				vaddr = kmap_atomic(p);
 				memcpy(to + copied, vaddr + p_off, p_len);
 				kunmap_atomic(vaddr);
@@ -4363,6 +4367,9 @@ int skb_gro_receive(struct sk_buff *p, struct sk_buff *skb)
 		unsigned int first_size = headlen - offset;
 		unsigned int first_offset;
 
+		if (skb_devmem_frag(lp))
+			goto merge;
+
 		if (nr_frags + 1 + skbinfo->nr_frags > MAX_SKB_FRAGS)
 			goto merge;
 
@@ -5378,12 +5385,15 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 	if (to->pp_recycle != from->pp_recycle)
 		return false;
 
-	if (len <= skb_tailroom(to)) {
+	if (len <= skb_tailroom(to) && !skb_devmem_frag(from)) {
 		if (len)
 			BUG_ON(skb_copy_bits(from, 0, skb_put(to, len), len));
 		*delta_truesize = 0;
 		return true;
 	}
+
+	if (skb_devmem_frag(from) || skb_devmem_frag(to))
+	        return false;
 
 	to_shinfo = skb_shinfo(to);
 	from_shinfo = skb_shinfo(from);
@@ -6377,6 +6387,9 @@ void skb_condense(struct sk_buff *skb)
 	if (skb->data_len) {
 		if (skb->data_len > skb->end - skb->tail ||
 		    skb_cloned(skb))
+			return;
+
+		if (skb_devmem_frag(skb))
 			return;
 
 		/* Nice, we can free page frag(s) right now */

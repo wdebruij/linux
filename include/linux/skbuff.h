@@ -454,6 +454,13 @@ enum {
 	 * all frags to avoid possible bad checksum
 	 */
 	SKBFL_SHARED_FRAG = BIT(1),
+
+	/* This indicates that all the fragments in this skb is backed by device
+	 * memory.
+	 * The networking stack should avoid mapping those frags and accessing
+	 * their content
+	 */
+	SKBFL_DEVMEM_FRAG = BIT(2),
 };
 
 #define SKBFL_ZEROCOPY_FRAG	(SKBFL_ZEROCOPY_ENABLE | SKBFL_SHARED_FRAG)
@@ -1451,6 +1458,22 @@ static inline unsigned int skb_end_offset(const struct sk_buff *skb)
 static inline struct skb_shared_hwtstamps *skb_hwtstamps(struct sk_buff *skb)
 {
 	return &skb_shinfo(skb)->hwtstamps;
+}
+
+static inline bool skb_devmem_frag(struct sk_buff *skb) {
+	return skb && skb_shinfo(skb)->flags & SKBFL_DEVMEM_FRAG;
+}
+
+static inline void skb_devmem_frag_set(struct sk_buff *skb) {
+	if (skb && !skb_devmem_frag(skb)) {
+		skb_shinfo(skb)->flags |= SKBFL_DEVMEM_FRAG;
+	}
+}
+
+static inline void skb_devmem_frag_clear(struct sk_buff *skb) {
+	if (skb && skb_devmem_frag(skb)) {
+		skb_shinfo(skb)->flags &= ~SKBFL_DEVMEM_FRAG;
+	}
 }
 
 static inline struct ubuf_info *skb_zcopy(struct sk_buff *skb)
@@ -3369,6 +3392,8 @@ static inline bool skb_can_coalesce(struct sk_buff *skb, int i,
 				    const struct page *page, int off)
 {
 	if (skb_zcopy(skb))
+		return false;
+	if (skb_devmem_frag(skb))
 		return false;
 	if (i) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i - 1];
