@@ -463,6 +463,8 @@ void tcp_init_sock(struct sock *sk)
 
 	sk_sockets_allocated_inc(sk);
 	sk->sk_route_forced_caps = NETIF_F_GSO;
+
+	xa_init_flags(&(tp->tcpdirect.page_pool), XA_FLAGS_ALLOC);
 }
 EXPORT_SYMBOL(tcp_init_sock);
 
@@ -2281,6 +2283,154 @@ static int tcp_inq_hint(struct sock *sk)
 	return inq;
 }
 
+static int tcp_copy_p2pdma_pages_asis(const struct sock *sk,
+                                     const struct sk_buff *skb, int offset,
+                                     struct msghdr *msg, int len)
+{
+	/* first copy header data stored in linear buffer to user buffer
+	 * same as __skb_datagram_iter
+	 */
+	int start = skb_headlen(skb);
+	struct sk_buff *frag_iter;
+	int i, copy = start - offset, n;
+	struct iovec iov;
+	int err;
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	/* First an iov for # bytes copied to user buffer */
+	iov.iov_base = 0;
+	iov.iov_len = (copy > len) ? len : ((copy > 0) ? copy : 0);
+	err = put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
+	if (err) {
+		goto fault;
+	}
+
+	/* Copy header. */
+	if (copy > 0) {
+		if (copy > len)
+			copy = len;
+		n = copy_to_iter(skb->data + offset, copy, &msg->msg_iter);
+		offset += n;
+		if (n != copy)
+			goto fault;
+		if ((len -= copy) == 0)
+			goto end;
+	}
+
+	/* after that, send information of p2pdma pages through a sequence
+	 * of cmsg
+	 */
+
+	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+		int end;
+		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+		struct page *page = skb_frag_page(frag);
+		end = start + skb_frag_size(frag);
+		copy = end - offset;
+		if (copy > 0) {
+			if (copy > len)
+				copy = len;
+			if (is_pci_p2pdma_page(page)) {
+				u32 user_token;
+				u64 in_frag_offset = offset - start;
+				iov.iov_base = (void *) page_to_phys(page) +
+						skb_frag_off(frag) +
+						in_frag_offset -
+						page->pgmap->range.start +
+						page->pgmap->hack_align_off;
+				iov.iov_len = copy;
+				err = put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET,
+					       sizeof(iov), &iov);
+				if (err)
+					goto fault;
+
+				/* allocate a u32 token from xarray,
+				 * this token is later used by user space to
+				 * free the corresponding page.
+				 */
+				err = xa_alloc(&(tp->tcpdirect.page_pool),
+					       &user_token, page,
+					       xa_limit_31b, GFP_KERNEL);
+				if (err)
+					goto fault;
+				iov.iov_base = (void *)(u64)user_token;
+
+				/* special marker value: indicate if all of this
+				 * fragment is "used"
+				 */
+				if (offset + copy == end)
+					iov.iov_len = 1;
+				else
+					iov.iov_len = 0;
+				get_page(page);
+				err = put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET,
+					       sizeof(iov), &iov);
+				if (err)
+					goto fault;
+			} else {
+				struct inet_sock* inetsk = inet_sk(sk);
+				net_info_ratelimited(KERN_ERR "calling recvmsg() with "
+						     "MSG_P2PDMAASIS but page is not p2pdma_page, "
+						     "flow info: %d --> %d\n",
+						     htons(inetsk->inet_sport),
+						     htons(inetsk->inet_dport));
+			}
+			offset += copy;
+			if (!(len -= copy))
+				goto end;
+		}
+		start = end;
+	}
+
+	/* if control reaches here, we need to look at the frag list.
+	 * But first put a cmsg with {0, 0} to mark the end of the
+	 * p2pdma pages list
+	 */
+
+	iov.iov_base = 0;
+	iov.iov_len = 0;
+	err = put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET,
+		       sizeof(iov), &iov);
+	if (err)
+		goto fault;
+
+	skb_walk_frags(skb, frag_iter) {
+		int end;
+		WARN_ON(start > offset + len);
+		end = start + frag_iter->len;
+		if ((copy = end - offset) > 0) {
+			if (copy > len)
+				copy = len;
+			err = tcp_copy_p2pdma_pages_asis(
+				sk, frag_iter, offset - start,
+				msg, copy);
+			if (err)
+				goto fault;
+			if ((len -= copy) == 0)
+				return 0;
+			offset += copy;
+		}
+		start = end;
+	}
+	if (!len)
+		return 0;
+	printk(KERN_ERR "Requesting more data than what we have!");
+	goto fault;
+end:
+	iov.iov_base = 0;
+	iov.iov_len = 0;
+	err = put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET,
+		       sizeof(iov), &iov);
+	if (err)
+		goto fault;
+	return 0;
+fault:
+	/* HACK: This is not correct as we are supposed to call iov_iter_revert
+	 * before return an error like what __skb_datagram_iter() does.
+	 */
+	return -EFAULT;
+}
+
 /*
  *	This routine copies from a sock struct into the user buffer.
  *
@@ -2467,7 +2617,7 @@ found_ok_skb:
 			}
 		}
 
-		if (!(flags & MSG_TRUNC)) {
+		if (!(flags & MSG_TRUNC) && !(flags & MSG_P2PDMAASIS)) {
 			err = skb_copy_datagram_msg(skb, offset, msg, used);
 			if (err) {
 				/* Exception. Bailout! */
@@ -2475,28 +2625,12 @@ found_ok_skb:
 					copied = -EFAULT;
 				break;
 			}
-		} else {
-			int i;
-
-			for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
-				const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-				struct page *page = skb_frag_page(frag);
-
-				if (is_pci_p2pdma_page(page)) {
-					struct iovec iov = {
-						.iov_base = (void *) page_to_phys(page) + skb_frag_off(frag) -
-							    page->pgmap->range.start +
-							    page->pgmap->hack_align_off,
-						.iov_len = skb_frag_size(frag),
-					};
-
-					put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
-
-					/* pass raw physaddr, to return later to pci_free_p2pmem */
-					iov.iov_base = (void *)page_to_phys(page) + skb_frag_off(frag);
-					iov.iov_len = 0;	/* special marker value: this is a physaddr */
-					put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET, sizeof(iov), &iov);
-				}
+		} else if (flags & MSG_P2PDMAASIS) {
+			err = tcp_copy_p2pdma_pages_asis(sk, skb, offset, msg, used);
+			if (err) {
+				if (!copied)
+					copied = -EFAULT;
+				break;
 			}
 		}
 

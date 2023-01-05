@@ -1372,18 +1372,56 @@ set_sndbuf:
 #if IS_ENABLED(CONFIG_PCI_P2PDMA)
 	case SO_DEVMEM_OFFSET:
 	{
-		struct iovec iov;
-
-		/* TODO: support sending multiple iov at once */
-		if (optlen != sizeof(iov)) {
+		u32 singleton_token;
+		struct tcp_sock *tp;
+		int num_tokens;
+		u32* tokens;
+		int i;
+		if (unlikely(!sk_is_tcp(sk))) {
+			pr_debug("SO_DEVMEM_OFFSET: not a tcp socket\n");
+			ret = -EBADF;
+			break;
+		}
+		tp = tcp_sk(sk);
+		if (optlen < sizeof(*tokens) || (optlen % sizeof(*tokens) != 0)) {
 			ret = -EINVAL;
 			break;
 		}
-		if (copy_from_sockptr(&iov, optval, sizeof(iov))) {
-			ret = -EFAULT;
-			break;
+		if (optlen == sizeof(*tokens)) {
+			if (copy_from_sockptr(&singleton_token, optval, sizeof(*tokens))) {
+				ret = -EFAULT;
+				break;
+			}
+			num_tokens = 1;
+			tokens = &singleton_token;
+		} else {
+			num_tokens = optlen / sizeof(*tokens);
+			tokens = kmalloc(optlen, GFP_KERNEL);
+			if (!tokens) {
+				ret = -ENOMEM;
+				break;
+			}
+			if (copy_from_sockptr(tokens, optval, optlen)) {
+				kfree(tokens);
+				ret = -EFAULT;
+				break;
+			}
 		}
-		ret = pci_free_p2pmem_iov(&iov);
+
+		ret = 0;
+		for (i = 0; i < num_tokens; i++) {
+			struct page *pg = xa_erase(&(tp->tcpdirect.page_pool), tokens[i]);
+			if (pg) {
+				put_page(pg);
+			} else {
+				pr_debug("SO_DEVMEM_OFFSET: invalid token\n");
+				ret = -EINVAL;
+				break;
+			}
+		}
+
+		if (num_tokens > 1)
+			kfree(tokens);
 	}
 	break;
 #endif

@@ -741,6 +741,18 @@ void pci_free_p2pmem(struct pci_dev *pdev, void *addr, size_t size)
 }
 EXPORT_SYMBOL_GPL(pci_free_p2pmem);
 
+void pci_free_p2pmem_page(struct page* pg)
+{
+	struct pci_dev *pdev;
+
+	if (!pg->pgmap)
+		printk(KERN_ERR "ERR: unexpected missing ptr\n");
+
+	pdev = to_p2p_pgmap(pg->pgmap)->provider;
+	pci_free_p2pmem(pdev, page_to_virt(pg), PAGE_SIZE);
+}
+
+
 /**
  * pci_p2pmem_virt_to_bus - return the PCI bus address for a given virtual
  *	address obtained with pci_alloc_p2pmem()
@@ -1041,9 +1053,7 @@ int pci_free_p2pmem_iov(const struct iovec *iov)
 		return -EINVAL;
 	}
 
-	pdev = to_p2p_pgmap(pg->pgmap)->provider;
-
-	pci_free_p2pmem(pdev, page_to_virt(pg), PAGE_SIZE);
+	put_page(pg);
 
 	return 0;
 }

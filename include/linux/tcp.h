@@ -16,6 +16,7 @@
 
 #include <linux/skbuff.h>
 #include <linux/win_minmax.h>
+#include <linux/xarray.h>
 #include <net/sock.h>
 #include <net/inet_connection_sock.h>
 #include <net/inet_timewait_sock.h>
@@ -412,6 +413,11 @@ struct tcp_sock {
 	 */
 	struct request_sock __rcu *fastopen_rsk;
 	struct saved_syn *saved_syn;
+
+/* TCPDirect related information */
+	struct {
+		struct xarray page_pool; /* pool of user-accessible pages */
+	} tcpdirect;
 };
 
 enum tsq_enum {

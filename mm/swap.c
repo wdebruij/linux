@@ -35,6 +35,7 @@
 #include <linux/uio.h>
 #include <linux/hugetlb.h>
 #include <linux/page_idle.h>
+#include <linux/pci-p2pdma.h>
 #include <linux/local_lock.h>
 #include <linux/buffer_head.h>
 
@@ -113,7 +114,11 @@ static void __put_compound_page(struct page *page)
 
 void __put_page(struct page *page)
 {
-	if (is_zone_device_page(page)) {
+	if (unlikely(is_pci_p2pdma_page(page))) {
+		set_page_count(page, 1);
+		pci_free_p2pmem_page(page);
+		return;
+	} else if (is_zone_device_page(page)) {
 		put_dev_pagemap(page->pgmap);
 
 		/*

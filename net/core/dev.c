@@ -4686,6 +4686,7 @@ struct page * __netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
 {
 	struct pci_dev *pdev;
 	void *kvirt;
+	struct page *pg;
 
 	rcu_read_lock();
 	pdev = rcu_dereference(rxq->p2pdma_dev);
@@ -4707,9 +4708,14 @@ struct page * __netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
 		kvirt = NULL;
 	}
 
-	pci_dev_put(pdev);
+	pg = virt_to_page(kvirt);
+	if (!is_pci_p2pdma_page(virt_to_page(kvirt)))
+		printk(KERN_ERR "allocated page is not a p2pdma page: %px\n", kvirt);
 
-	return kvirt ? virt_to_page(kvirt) : NULL;
+	pci_dev_put(pdev);
+	net_info_ratelimited("p2pdma page ref_cnt: %d\n", page_count(pg));
+
+	return kvirt ? pg : NULL;
 }
 EXPORT_SYMBOL(__netdev_rxq_alloc_page);
 

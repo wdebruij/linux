@@ -762,6 +762,7 @@ static inline void netdev_rxq_free_page(struct page *pg)
 	if (is_pci_p2pdma_page(pg)) {
 		/* pci_free_p2pmem */
 		net_info_ratelimited("p2pdma free (skipped)");
+		put_page(pg);
 		return;
 	}
 
