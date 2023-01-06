@@ -268,6 +268,7 @@
 #include <linux/errqueue.h>
 #include <linux/static_key.h>
 #include <linux/btf.h>
+#include <linux/dma-buf.h>
 
 #include <net/icmp.h>
 #include <net/inet_common.h>
@@ -1206,7 +1207,6 @@ static int tcp_prepare_p2pdma_zc_data(struct msghdr *msg, struct file **zc_file,
 	int *cmsg_data = NULL;
 	int zc_fd;
 	int zc_bvec_offset;
-	struct p2pdma_pages_vec *pages_vec;
 
 	for_each_cmsghdr(cmsg, msg) {
 		if (!CMSG_OK(msg, cmsg)) {
@@ -1231,8 +1231,14 @@ static int tcp_prepare_p2pdma_zc_data(struct msghdr *msg, struct file **zc_file,
 			err = -EINVAL;
 			goto out;
 		}
-		pages_vec = (struct p2pdma_pages_vec *)(*zc_file)->private_data;
-		*zc_bvec_iter = pages_vec->pages_iter;
+		if (is_dma_buf_frags_file(*zc_file)) {
+			struct dma_buf_frags_file_priv *priv = (struct dma_buf_frags_file_priv *)(*zc_file)->private_data;
+			*zc_bvec_iter = priv->tx_iter;
+		} else {
+			struct p2pdma_pages_vec *pages_vec =
+					(struct p2pdma_pages_vec *)(*zc_file)->private_data;
+			*zc_bvec_iter = pages_vec->pages_iter;
+		}
 		iov_iter_advance(zc_bvec_iter, zc_bvec_offset);
 	}
 	if (!found_fd) {

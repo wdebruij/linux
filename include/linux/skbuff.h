@@ -29,6 +29,7 @@
 #include <linux/rcupdate.h>
 #include <linux/hrtimer.h>
 #include <linux/dma-mapping.h>
+#include <linux/dma-buf.h>
 #include <linux/netdev_features.h>
 #include <linux/pci-p2pdma.h>
 #include <linux/sched.h>
@@ -3234,6 +3235,10 @@ static inline dma_addr_t skb_frag_dma_map(struct device *dev,
 		pci_p2pdma_compute_maptype_if_not_cached(skb_frag_page(frag)->pgmap, to_pci_dev(dev));
 		pci_p2pdma_map_sg(dev, &sgl, 1, dir);
 		return sgl.dma_address;
+	} else if (unlikely(is_dma_buf_frags_dummy_page(skb_frag_page(frag)))) {
+		struct page *page = skb_frag_page(frag);
+		dma_addr_t dma_addr = (dma_addr_t)page->zone_device_data;
+		return dma_addr + skb_frag_off(frag) + offset;
 	} else {
 		return dma_map_page(dev, skb_frag_page(frag),
 				    skb_frag_off(frag) + offset, size, dir);
