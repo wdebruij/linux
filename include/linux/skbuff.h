@@ -30,6 +30,7 @@
 #include <linux/hrtimer.h>
 #include <linux/dma-mapping.h>
 #include <linux/netdev_features.h>
+#include <linux/pci-p2pdma.h>
 #include <linux/sched.h>
 #include <linux/sched/clock.h>
 #include <net/flow_dissector.h>
@@ -513,7 +514,7 @@ void msg_zerocopy_callback(struct sk_buff *skb, struct ubuf_info *uarg,
 
 int skb_zerocopy_iter_dgram(struct sk_buff *skb, struct msghdr *msg, int len);
 int skb_zerocopy_iter_stream(struct sock *sk, struct sk_buff *skb,
-			     struct msghdr *msg, int len,
+			     struct iov_iter *iov_iter, int len,
 			     struct ubuf_info *uarg);
 
 /* This data is invariant across clones and lives at
@@ -3225,8 +3226,18 @@ static inline dma_addr_t skb_frag_dma_map(struct device *dev,
 					  size_t offset, size_t size,
 					  enum dma_data_direction dir)
 {
-	return dma_map_page(dev, skb_frag_page(frag),
-			    skb_frag_off(frag) + offset, size, dir);
+	if (unlikely(is_pci_p2pdma_page(skb_frag_page(frag)))) {
+		struct scatterlist sgl;
+		sgl.page_link = (unsigned long)skb_frag_page(frag);
+		sgl.offset = skb_frag_off(frag) + offset;
+		sgl.length = size;
+		pci_p2pdma_compute_maptype_if_not_cached(skb_frag_page(frag)->pgmap, to_pci_dev(dev));
+		pci_p2pdma_map_sg(dev, &sgl, 1, dir);
+		return sgl.dma_address;
+	} else {
+		return dma_map_page(dev, skb_frag_page(frag),
+				    skb_frag_off(frag) + offset, size, dir);
+	}
 }
 
 static inline struct sk_buff *pskb_copy(struct sk_buff *skb,

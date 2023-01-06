@@ -115,6 +115,10 @@ static void __put_compound_page(struct page *page)
 void __put_page(struct page *page)
 {
 	if (unlikely(is_pci_p2pdma_page(page))) {
+		if (page->pgmap->ops && page->pgmap->ops->page_free) {
+			page->pgmap->ops->page_free(page);
+			return;
+		}
 		set_page_count(page, 1);
 		pci_free_p2pmem_page(page);
 		return;

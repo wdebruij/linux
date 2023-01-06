@@ -1199,6 +1199,50 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 	return err;
 }
 
+static int tcp_prepare_p2pdma_zc_data(struct msghdr *msg, struct file **zc_file, struct iov_iter *zc_bvec_iter) {
+	int err = 0;
+	struct cmsghdr *cmsg;
+	bool found_fd = false;
+	int *cmsg_data = NULL;
+	int zc_fd;
+	int zc_bvec_offset;
+	struct p2pdma_pages_vec *pages_vec;
+
+	for_each_cmsghdr(cmsg, msg) {
+		if (!CMSG_OK(msg, cmsg)) {
+			err = -EINVAL;
+			goto out;
+		}
+		if (cmsg->cmsg_level != SOL_SOCKET)
+			continue;
+		if (cmsg->cmsg_type != SCM_RIGHTS) {
+			continue;
+		}
+		found_fd = true;
+		if (cmsg->cmsg_len != CMSG_LEN(sizeof(int) * 2)) {
+			err = -EINVAL;
+			goto out;
+		}
+		cmsg_data = (int *)CMSG_DATA(cmsg);
+		zc_fd = cmsg_data[0];
+		zc_bvec_offset = cmsg_data[1];
+		*zc_file = fget_raw(zc_fd);
+		if (!*zc_file) {
+			err = -EINVAL;
+			goto out;
+		}
+		pages_vec = (struct p2pdma_pages_vec *)(*zc_file)->private_data;
+		*zc_bvec_iter = pages_vec->pages_iter;
+		iov_iter_advance(zc_bvec_iter, zc_bvec_offset);
+	}
+	if (!found_fd) {
+		err = -EINVAL;
+		goto out;
+	}
+out:
+	return err;
+}
+
 int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -1210,6 +1254,8 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 	int process_backlog = 0;
 	bool zc = false;
 	long timeo;
+	struct file *zc_file = NULL;
+	struct iov_iter zc_bvec_iter;
 
 	flags = msg->msg_flags;
 
@@ -1219,6 +1265,12 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 		if (!uarg) {
 			err = -ENOBUFS;
 			goto out_err;
+		}
+
+		if (flags & MSG_P2PDMAASIS) {
+			err = tcp_prepare_p2pdma_zc_data(msg, &zc_file, &zc_bvec_iter);
+			if (err)
+				goto out_err;
 		}
 
 		zc = sk->sk_route_caps & NETIF_F_SG;
@@ -1377,7 +1429,13 @@ new_segment:
 			if (!sk_wmem_schedule(sk, copy))
 				goto wait_for_space;
 
-			err = skb_zerocopy_iter_stream(sk, skb, msg, copy, uarg);
+			if (zc_file) {
+				err = skb_zerocopy_iter_stream(sk, skb, &zc_bvec_iter, copy, uarg);
+				if (err > 0)
+					iov_iter_advance(&msg->msg_iter, err);
+			} else
+				err = skb_zerocopy_iter_stream(sk, skb, &msg->msg_iter, copy, uarg);
+
 			if (err == -EMSGSIZE || err == -EEXIST) {
 				tcp_mark_push(tp, skb);
 				goto new_segment;
@@ -1431,6 +1489,8 @@ out:
 	}
 out_nopush:
 	net_zcopy_put(uarg);
+	if (zc_file)
+		fput(zc_file);
 	return copied + copied_syn;
 
 do_error:
@@ -1441,6 +1501,8 @@ do_fault:
 	if (copied + copied_syn)
 		goto out;
 out_err:
+	if (zc_file)
+		fput(zc_file);
 	net_zcopy_put_abort(uarg, true);
 	err = sk_stream_error(sk, flags, err);
 	/* make sure we wake any epoll edge trigger waiter */

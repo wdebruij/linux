@@ -35,12 +35,6 @@ struct pci_p2pdma {
 	struct xarray map_types;
 };
 
-struct pci_p2pdma_pagemap {
-	struct dev_pagemap pgmap;
-	struct pci_dev *provider;
-	u64 bus_offset;
-};
-
 static struct pci_p2pdma_pagemap *to_p2p_pgmap(struct dev_pagemap *pgmap)
 {
 	return container_of(pgmap, struct pci_p2pdma_pagemap, pgmap);
@@ -1057,3 +1051,24 @@ int pci_free_p2pmem_iov(const struct iovec *iov)
 
 	return 0;
 }
+
+void pci_p2pdma_compute_maptype_if_not_cached(struct dev_pagemap *pgmap,
+					      struct pci_dev *client)
+{
+	enum pci_p2pdma_map_type type = PCI_P2PDMA_MAP_UNKNOWN;
+	struct pci_dev *p2p_dev = to_p2p_pgmap(pgmap)->provider;
+	struct pci_p2pdma *p2pdma;
+	int dist;
+	rcu_read_lock();
+	p2pdma = rcu_dereference(p2p_dev->p2pdma);
+	if (p2pdma)
+		type = xa_to_value(xa_load(&p2pdma->map_types,
+					   map_types_idx(client)));
+	rcu_read_unlock();
+
+	if (type == PCI_P2PDMA_MAP_UNKNOWN) {
+		type = calc_map_type_and_dist(p2p_dev, client, &dist, true);
+		printk(KERN_ERR "p2pdma map type: %d\n", (int)type);
+	}
+}
+EXPORT_SYMBOL_GPL(pci_p2pdma_compute_maptype_if_not_cached);

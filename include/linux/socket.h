@@ -314,7 +314,9 @@ struct ucred {
 					  * plain text and require encryption
 					  */
 
-#define MSG_P2PDMAASIS 0x2000000 /* don't copy p2pdma pages but return them as cmsg instead */
+#define MSG_P2PDMAASIS 0x2000000 /* Recv: don't copy p2pdma pages but return them as cmsg instead
+				  * Send: use fd in msghdr to send p2pdma pages, also requires MSG_ZEROCOPY
+				  */
 
 #define MSG_ZEROCOPY	0x4000000	/* Use user data in kernel path */
 #define MSG_FASTOPEN	0x20000000	/* Send data in TCP SYN */
