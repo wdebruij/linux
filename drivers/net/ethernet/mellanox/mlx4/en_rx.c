@@ -42,6 +42,7 @@
 #include <linux/if_vlan.h>
 #include <linux/vmalloc.h>
 #include <linux/irq.h>
+#include <linux/pci-p2pdma.h>
 
 #include <net/ip.h>
 #if IS_ENABLED(CONFIG_IPV6)
@@ -495,6 +496,8 @@ static int mlx4_en_complete_rx_desc(struct mlx4_en_priv *priv,
 
 		__skb_fill_page_desc(skb, nr, page, frags->page_offset,
 				     frag_size);
+		if (is_pci_p2pdma_page(page))
+			skb_devmem_frag_set(skb);
 
 		truesize += frag_info->frag_stride;
 		if (frag_info->frag_stride == PAGE_SIZE / 2) {
