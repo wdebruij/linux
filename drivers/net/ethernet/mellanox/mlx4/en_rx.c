@@ -43,6 +43,7 @@
 #include <linux/vmalloc.h>
 #include <linux/irq.h>
 #include <linux/pci-p2pdma.h>
+#include <linux/dma-buf.h>
 
 #include <net/ip.h>
 #if IS_ENABLED(CONFIG_IPV6)
@@ -73,6 +74,8 @@ static int mlx4_alloc_page(struct mlx4_en_priv *priv,
 		pci_p2pdma_compute_maptype_if_not_cached(page->pgmap, priv->ddev);
 		pci_p2pdma_map_sg(priv->ddev, &sgl, 1, priv->dma_dir);
 		dma = sgl.dma_address;
+	} else if (is_dma_buf_frags_dummy_page(page)) {
+		dma = (dma_addr_t)page->zone_device_data;
 	} else {
 		dma = dma_map_page(priv->ddev, page, 0, PAGE_SIZE, priv->dma_dir);
 		if (unlikely(dma_mapping_error(priv->ddev, dma))) {
@@ -117,6 +120,8 @@ static void mlx4_en_free_frag(const struct mlx4_en_priv *priv,
 			sgl.length = PAGE_SIZE;
 			sgl.dma_address = frag->dma;
 			pci_p2pdma_unmap_sg(priv->ddev, &sgl, 1, priv->dma_dir);
+		} else if (is_dma_buf_frags_dummy_page(frag->page)) {
+			// for dmabuf pages, nothing needs to be done.
 		} else
 			dma_unmap_page(priv->ddev, frag->dma,
 				       PAGE_SIZE, priv->dma_dir);
@@ -483,6 +488,8 @@ void mlx4_en_deactivate_rx_ring(struct mlx4_en_priv *priv,
 			sgl.length = PAGE_SIZE;
 			sgl.dma_address = ring->page_cache.buf[i].dma;
 			pci_p2pdma_unmap_sg(priv->ddev, &sgl, 1, priv->dma_dir);
+		} else if (is_dma_buf_frags_dummy_page(ring->page_cache.buf[i].page)) {
+			// for dmabuf pages, nothing needs to be done.
 		} else
 			dma_unmap_page(priv->ddev, ring->page_cache.buf[i].dma,
 				       PAGE_SIZE, priv->dma_dir);
@@ -521,7 +528,7 @@ static int mlx4_en_complete_rx_desc(struct mlx4_en_priv *priv,
 
 		__skb_fill_page_desc(skb, nr, page, frags->page_offset,
 				     frag_size);
-		if (is_pci_p2pdma_page(page))
+		if (is_pci_p2pdma_page(page) || is_dma_buf_frags_dummy_page(page))
 			skb_devmem_frag_set(skb);
 
 		truesize += frag_info->frag_stride;
@@ -548,6 +555,8 @@ static int mlx4_en_complete_rx_desc(struct mlx4_en_priv *priv,
 				sgl.length = PAGE_SIZE;
 				sgl.dma_address = dma;
 				pci_p2pdma_unmap_sg(priv->ddev, &sgl, 1, priv->dma_dir);
+			} else if (is_dma_buf_frags_dummy_page(frag->page)) {
+				// for dmabuf pages, nothing needs to be done.
 			} else
 				dma_unmap_page(priv->ddev, dma, PAGE_SIZE, priv->dma_dir);
 			frags->page = NULL;
