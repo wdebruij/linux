@@ -82,6 +82,12 @@ struct dma_buf_frags_create_info {
 	__s32 direction;
 };
 
+struct dma_buf_frags_bind_rx_queue {
+	char *ifname;
+	__u32 ifname_len;
+	__u32 rxq_idx;
+};
+
 #define DMA_BUF_SYNC_READ      (1 << 0)
 #define DMA_BUF_SYNC_WRITE     (2 << 0)
 #define DMA_BUF_SYNC_RW        (DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)
@@ -103,5 +109,6 @@ struct dma_buf_frags_create_info {
 #define DMA_BUF_SET_NAME_B	_IOW(DMA_BUF_BASE, 1, u64)
 
 #define DMA_BUF_FRAGS_CREATE   _IOW(DMA_BUF_BASE, 2, struct dma_buf_frags_create_info)
+#define DMA_BUF_FRAGS_BIND_RX  _IOW(DMA_BUF_BASE, 3, struct dma_buf_frags_bind_rx_queue)
 
 #endif

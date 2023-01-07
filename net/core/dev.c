@@ -4719,6 +4719,50 @@ struct page * __netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
 }
 EXPORT_SYMBOL(__netdev_rxq_alloc_page);
 
+struct page * __netdev_rxq_alloc_page_from_dmabuf_pool(struct netdev_rx_queue *rxq,
+						       int nid, gfp_t gfp_mask,
+						       unsigned int order)
+{
+	struct file *dmabuf_frags_file;
+	struct page *pg = NULL;
+	size_t offset;
+	unsigned long kvirt;
+	void *arr_base;
+	struct dma_buf_frags_file_priv *priv;
+
+	rcu_read_lock();
+	dmabuf_frags_file = rcu_dereference(rxq->dmabuf_frags);
+	if (dmabuf_frags_file)
+		get_file(dmabuf_frags_file);
+	rcu_read_unlock();
+
+	if (!dmabuf_frags_file)
+		return __alloc_pages_node(nid, gfp_mask, order);
+
+	priv = (struct dma_buf_frags_file_priv *)dmabuf_frags_file->private_data;
+	kvirt = gen_pool_alloc_owner(priv->page_pool, PAGE_SIZE, &arr_base);
+	if (!kvirt)
+		goto out;
+
+	if (!PAGE_ALIGNED(kvirt)) {
+		net_info_ratelimited("dmabuf page pool allocation not aligned");
+		gen_pool_free(priv->page_pool, kvirt, PAGE_SIZE);
+	}
+
+	offset = (kvirt - PAGE_SIZE) >> PAGE_SHIFT;
+	pg = &((struct page *)arr_base)[offset];
+	if (!is_dma_buf_frags_dummy_page(pg)) {
+		net_err_ratelimited("allocated page is not a dummy page of dmabuf: 0x%x\n", (u64)kvirt);
+		pg = NULL;
+		goto out;
+	}
+	percpu_ref_get(pg->pgmap->ref);
+out:
+	fput(dmabuf_frags_file);
+	return pg;
+}
+EXPORT_SYMBOL(__netdev_rxq_alloc_page_from_dmabuf_pool);
+
 u32 bpf_prog_run_generic_xdp(struct sk_buff *skb, struct xdp_buff *xdp,
 			     struct bpf_prog *xdp_prog)
 {

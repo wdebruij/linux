@@ -25,6 +25,7 @@
 #include <linux/wait.h>
 #include <linux/uio.h>
 #include <linux/genalloc.h>
+#include <linux/xarray.h>
 
 struct device;
 struct dma_buf;
@@ -564,6 +565,7 @@ struct dma_buf_frags_file_priv {
 
 	// fields for Rx
 	struct gen_pool *page_pool;
+	struct xarray bound_rxq_list;
 };
 
 /**
@@ -652,5 +654,25 @@ void dma_buf_vunmap(struct dma_buf *dmabuf, struct dma_buf_map *map);
 
 bool is_dma_buf_frags_file(struct file *file);
 bool is_dma_buf_frags_dummy_page(struct page *page);
+
+static inline int dma_buf_frags_map_sg(struct device *dev, struct scatterlist *sg,
+				       int nents, enum dma_data_direction dir)
+{
+	struct scatterlist *s;
+	int i;
+
+	for_each_sg(sg, s, nents, i) {
+		struct page *pg = sg_page(s);
+		s->dma_address = (dma_addr_t)pg->zone_device_data;
+		sg_dma_len(s) = s->length;
+	}
+
+	return nents;
+}
+
+static inline void dma_buf_frags_unmap_sg(struct device *dev, struct scatterlist *sg,
+					  int nents, enum dma_data_direction dir)
+{
+}
 
 #endif /* __DMA_BUF_H__ */

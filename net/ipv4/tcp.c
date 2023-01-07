@@ -2398,14 +2398,22 @@ static int tcp_copy_p2pdma_pages_asis(const struct sock *sk,
 		if (copy > 0) {
 			if (copy > len)
 				copy = len;
-			if (is_pci_p2pdma_page(page)) {
+			if (is_pci_p2pdma_page(page) || is_dma_buf_frags_dummy_page(page)) {
 				u32 user_token;
 				u64 in_frag_offset = offset - start;
-				iov.iov_base = (void *) page_to_phys(page) +
-						skb_frag_off(frag) +
-						in_frag_offset -
-						page->pgmap->range.start +
-						page->pgmap->hack_align_off;
+				if (is_pci_p2pdma_page(page))
+					iov.iov_base = (void *) page_to_phys(page) +
+							skb_frag_off(frag) +
+							in_frag_offset -
+							page->pgmap->range.start +
+							page->pgmap->hack_align_off;
+				else {
+					struct dev_pagemap *pgmap = page->pgmap;
+					struct dma_buf_frags_file_priv *priv = container_of(pgmap, struct dma_buf_frags_file_priv, pgmap);
+					struct page *dummy_pages = priv->pages;
+					u64 frag_offset = ((page - dummy_pages) << PAGE_SHIFT) + skb_frag_off(frag) + in_frag_offset;
+					iov.iov_base = (void *)frag_offset;
+				}
 				iov.iov_len = copy;
 				err = put_cmsg(msg, SOL_SOCKET, SO_DEVMEM_OFFSET,
 					       sizeof(iov), &iov);
