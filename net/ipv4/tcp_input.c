@@ -5136,6 +5136,12 @@ tcp_collapse(struct sock *sk, struct sk_buff_head *list, struct rb_root *root,
 	struct sk_buff_head tmp;
 	bool end_of_skbs;
 
+	/* Skipping this function for now as this function potentially
+	 * merges two skbuffs, which could be a issue if one of them contains
+	 * p2pdma pages
+	 */
+	return;
+
 	/* First, check that queue is collapsible and find
 	 * the point where collapsing can be useful.
 	 */

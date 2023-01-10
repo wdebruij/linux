@@ -20,10 +20,12 @@
 #include <linux/debugfs.h>
 #include <linux/module.h>
 #include <linux/seq_file.h>
+#include <linux/pci.h>
 #include <linux/poll.h>
 #include <linux/dma-resv.h>
 #include <linux/mm.h>
 #include <linux/mount.h>
+#include <linux/netdevice.h>
 #include <linux/pseudo_fs.h>
 
 #include <uapi/linux/dma-buf.h>
@@ -365,12 +367,15 @@ out_unlock:
 	return ret;
 }
 
+static long dma_buf_frags_create_frags(struct file *file, struct dma_buf_frags_create_info *create_info);
+
 static long dma_buf_ioctl(struct file *file,
 			  unsigned int cmd, unsigned long arg)
 {
 	struct dma_buf *dmabuf;
 	struct dma_buf_sync sync;
 	enum dma_data_direction direction;
+	struct dma_buf_frags_create_info create_info;
 	int ret;
 
 	dmabuf = file->private_data;
@@ -407,6 +412,10 @@ static long dma_buf_ioctl(struct file *file,
 	case DMA_BUF_SET_NAME_A:
 	case DMA_BUF_SET_NAME_B:
 		return dma_buf_set_name(dmabuf, (const char __user *)arg);
+	case DMA_BUF_FRAGS_CREATE:
+		if (copy_from_user(&create_info, (void __user *)arg, sizeof(create_info)))
+			return -EFAULT;
+		return dma_buf_frags_create_frags(file, &create_info);
 
 	default:
 		return -ENOTTY;
@@ -1361,6 +1370,341 @@ void dma_buf_vunmap(struct dma_buf *dmabuf, struct dma_buf_map *map)
 	mutex_unlock(&dmabuf->lock);
 }
 EXPORT_SYMBOL_GPL(dma_buf_vunmap);
+
+DEFINE_MUTEX(bind_rx_queue_mutex);
+
+static int dma_buf_frags_release(struct inode *inode, struct file *file)
+{
+	struct dma_buf_frags_file_priv *priv = (struct dma_buf_frags_file_priv *)file->private_data;
+	unsigned long xa_idx;
+	struct netdev_rx_queue *rxq;
+	struct file *old_frags = NULL;
+
+	xa_for_each(&priv->bound_rxq_list, xa_idx, rxq) {
+		mutex_lock(&bind_rx_queue_mutex);
+		old_frags = rcu_dereference_protected(rxq->dmabuf_frags,
+						      mutex_is_locked(&bind_rx_queue_mutex));
+		if (old_frags == file)
+			rcu_assign_pointer(rxq->dmabuf_frags, NULL);
+		mutex_unlock(&bind_rx_queue_mutex);
+	}
+
+	if (priv->tx_bv) {
+		int i;
+		for (i = 0; i < priv->num_pages; i++) {
+			put_page(&priv->pages[i]);
+		}
+	}
+	percpu_ref_kill(priv->pgmap.ref);
+	wait_for_completion(&priv->pgmap.done);
+
+	if (priv->tx_bv)
+		kfree(priv->tx_bv);
+	else
+		gen_pool_destroy(priv->page_pool);
+	kfree(priv->pages);
+	dma_buf_unmap_attachment(priv->attachment, priv->sgt, priv->direction);
+	dma_buf_detach(priv->dmabuf, priv->attachment);
+	dma_buf_put(priv->dmabuf);
+	pci_dev_put(priv->pci_dev);
+	vfree(priv);
+	return 0;
+}
+
+static int dma_buf_frags_bind_rx_queue(struct file *file, struct dma_buf_frags_bind_rx_queue *bind_rx_queue)
+{
+	struct dma_buf_frags_file_priv *priv = (struct dma_buf_frags_file_priv *)file->private_data;
+	struct file *old_frags = NULL;
+	struct netdev_rx_queue *rxq;
+	struct net_device *netdev;
+	char ifname[IFNAMSIZ + 1];
+	int xa_id;
+	int err;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	if (!priv->page_pool)
+		return -ENOTTY;
+
+	if (bind_rx_queue->ifname_len > IFNAMSIZ)
+		return -EINVAL;
+
+	if (copy_from_user(ifname, bind_rx_queue->ifname, bind_rx_queue->ifname_len))
+		return -EFAULT;
+
+	ifname[bind_rx_queue->ifname_len + 1] = 0;
+
+	netdev = dev_get_by_name(current->nsproxy->net_ns, ifname);
+	if (!netdev)
+		return -EINVAL;
+
+	if (!dev_is_pci(netdev->dev.parent)) {
+		pr_err("netdevice is not a PCI device\n");
+		err = -EINVAL;
+		goto out_put_dev;
+	}
+
+	if (to_pci_dev(netdev->dev.parent) != priv->pci_dev) {
+		pr_err("binding Rx buffer to wrong PCI device\n");
+		err = -EINVAL;
+		goto out_put_dev;
+	}
+
+	if (bind_rx_queue->rxq_idx >= netdev->num_rx_queues) {
+		err = -EINVAL;
+		goto out_put_dev;
+	}
+
+	rxq = __netif_get_rx_queue(netdev, bind_rx_queue->rxq_idx);
+
+	err = xa_alloc(&priv->bound_rxq_list, &xa_id, rxq, xa_limit_32b, GFP_KERNEL);
+	if (err)
+		goto out_put_dev;
+
+	mutex_lock(&bind_rx_queue_mutex);
+	old_frags = rcu_dereference_protected(rxq->dmabuf_frags,
+					      mutex_is_locked(&bind_rx_queue_mutex));
+	rcu_assign_pointer(rxq->dmabuf_frags, file);
+
+	mutex_unlock(&bind_rx_queue_mutex);
+out_put_dev:
+	dev_put(netdev);
+	return err;
+}
+
+static long dma_buf_frags_ioctl(struct file *file, unsigned int op, unsigned long arg)
+{
+	struct dma_buf_frags_bind_rx_queue bind_rx_queue;
+	void *input_ptr = (void *)arg;
+	switch (op) {
+	case DMA_BUF_FRAGS_BIND_RX:
+		if (copy_from_user(&bind_rx_queue, input_ptr, sizeof(bind_rx_queue)))
+			return -EFAULT;
+		return dma_buf_frags_bind_rx_queue(file, &bind_rx_queue);
+		break;
+	default:
+		return -EINVAL;
+	}
+}
+
+static void dma_buf_frags_percpu_release(struct percpu_ref *ref)
+{
+	struct dev_pagemap *pgmap = container_of(ref, struct dev_pagemap, internal_ref);
+	complete(&pgmap->done);
+}
+
+static void dma_buf_frags_pgmap_page_free(struct page *page)
+{
+	struct dev_pagemap *pgmap = page->pgmap;
+	struct dma_buf_frags_file_priv *priv = container_of(pgmap, struct dma_buf_frags_file_priv, pgmap);
+	if (priv->page_pool) {
+		// Rx
+		int offset = page - priv->pages;
+		set_page_count(page, 1);
+		gen_pool_free_owner(priv->page_pool, (offset + 1) << PAGE_SHIFT, PAGE_SIZE, (void *)priv->pages);
+		percpu_ref_put(pgmap->ref);
+	} else {
+		// Tx
+		// For Tx pages, ref count would not reach zero
+		// before the struct file is released
+		percpu_ref_put(pgmap->ref);
+	}
+}
+
+static const struct dev_pagemap_ops dma_buf_frags_pgmap_ops = {
+	.page_free  = dma_buf_frags_pgmap_page_free,
+};
+
+static const struct file_operations dma_buf_frags_fops = {
+	.unlocked_ioctl	= dma_buf_frags_ioctl,
+	.release	= dma_buf_frags_release,
+};
+
+static inline enum dma_data_direction create_info_get_direction(struct dma_buf_frags_create_info *create_info)
+{
+	switch (create_info->direction) {
+	case 0:
+		return DMA_BIDIRECTIONAL;
+	case 1:
+		return DMA_TO_DEVICE;
+	case 2:
+		return DMA_FROM_DEVICE;
+	default:
+		return DMA_NONE;
+	}
+}
+
+static long dma_buf_frags_create_frags(struct file *file, struct dma_buf_frags_create_info *create_info)
+{
+	int err, fd, i, pg_idx;
+	struct scatterlist *sg;
+	struct dma_buf_frags_file_priv *priv;
+	struct file *new_file;
+
+	fd = get_unused_fd_flags(O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		err = fd;
+		goto out_err;
+	}
+
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	if (!priv) {
+		err = -ENOMEM;
+		goto out_put_fd;
+	}
+	priv->pgmap.type = MEMORY_DEVICE_PRIVATE;
+	priv->pgmap.ops = &dma_buf_frags_pgmap_ops;
+
+	init_completion(&priv->pgmap.done);
+	err = percpu_ref_init(&priv->pgmap.internal_ref, dma_buf_frags_percpu_release, 0, GFP_KERNEL);
+	if (err)
+		goto out_free_priv;
+	priv->pgmap.ref = &priv->pgmap.internal_ref;
+
+	priv->pci_dev = pci_get_domain_bus_and_slot(0, create_info->pci_bdf[0],
+						    PCI_DEVFN(create_info->pci_bdf[1],
+							      create_info->pci_bdf[2]));
+	if (!priv->pci_dev) {
+		err = -ENODEV;
+		goto out_exit_percpu_ref;
+	}
+
+	priv->dmabuf = dma_buf_get(create_info->dma_buf_fd);
+	if (IS_ERR(priv->dmabuf)) {
+		err = PTR_ERR(priv->dmabuf);
+		goto out_put_pci_dev;
+	}
+
+	priv->attachment = dma_buf_attach(priv->dmabuf, &priv->pci_dev->dev);
+	if (IS_ERR(priv->attachment)) {
+		err = PTR_ERR(priv->attachment);
+		goto out_put_dma_buf;
+	}
+
+	BUG_ON(priv->dmabuf->size % PAGE_SIZE != 0);
+	priv->num_pages = priv->dmabuf->size / PAGE_SIZE;
+	priv->pages = vzalloc(sizeof(struct page) * priv->num_pages);
+	if (!priv->pages) {
+		err = -ENOMEM;
+		pr_err("failed to allocate pages: num_pages == %d\n", priv->num_pages);
+		goto out_detach_dma_buf;
+	}
+
+	for (i = 0; i < priv->num_pages; i++) {
+		struct page *page = &priv->pages[i];
+		mm_zero_struct_page(page);
+		set_page_zone(page, ZONE_DEVICE);
+		init_page_count(page);
+		page->pgmap = &priv->pgmap;
+	}
+
+	priv->direction = create_info_get_direction(create_info);
+	priv->sgt = dma_buf_map_attachment(priv->attachment, priv->direction);
+	if (IS_ERR(priv->sgt)) {
+		err = PTR_ERR(priv->sgt);
+		goto out_kfree_pages;
+	}
+
+	// Now write each dma address to each page
+	pg_idx = 0;
+	for_each_sgtable_dma_sg(priv->sgt, sg, i) {
+		int len = sg_dma_len(sg);
+		dma_addr_t dma_addr = sg_dma_address(sg);
+		BUG_ON(!PAGE_ALIGNED(len));
+		while (len > 0) {
+			priv->pages[pg_idx].zone_device_data = (void *)dma_addr;
+			pg_idx++;
+			dma_addr += PAGE_SIZE;
+			len -= PAGE_SIZE;
+		}
+	}
+
+	if (create_info->create_page_pool != 0) {
+		priv->page_pool = gen_pool_create(PAGE_SHIFT, dev_to_node(&priv->pci_dev->dev));
+		if (!priv->page_pool) {
+			err = -ENOMEM;
+			pr_err("failed to create gen_pool\n");
+			goto out_unmap_dma_buf;
+		}
+		// Here the gen_pool holds "dummy address",
+		// pointer to dummy struct page is computed from this address
+		// we start with PAGE_SIZE instead of 0 since
+		// gen_pool_alloc_*() returns NULL when error
+		err = gen_pool_add_owner(priv->page_pool, PAGE_SIZE, 0,
+					 PAGE_SIZE * priv->num_pages,
+					 dev_to_node(&priv->pci_dev->dev),
+					 (void *)priv->pages);
+		if (err)
+			goto out_destroy_genpool;
+		xa_init_flags(&priv->bound_rxq_list, XA_FLAGS_ALLOC);
+		priv->tx_bv = NULL;
+	} else {
+		priv->page_pool = NULL;
+		priv->tx_bv = kzalloc(sizeof(struct bio_vec) * priv->num_pages, GFP_KERNEL);
+		if (!priv->tx_bv) {
+			err = -ENOMEM;
+			pr_err("failed to allocate tx_bv\n");
+			goto out_unmap_dma_buf;
+		}
+		for (i = 0; i < priv->num_pages; i++) {
+			priv->tx_bv[i].bv_page = &priv->pages[i];
+			priv->tx_bv[i].bv_offset = 0;
+			priv->tx_bv[i].bv_len = PAGE_SIZE;
+			percpu_ref_get(priv->pgmap.ref);
+		}
+		iov_iter_bvec(&priv->tx_iter, WRITE,
+			      priv->tx_bv, priv->num_pages,
+			      priv->dmabuf->size);
+	}
+
+	new_file = anon_inode_getfile("[dma_buf_frags]", &dma_buf_frags_fops,
+				      (void *)priv, O_RDWR | O_CLOEXEC);
+	if (IS_ERR(new_file)) {
+		err = PTR_ERR(new_file);
+		goto out_destroy_genpool;
+	}
+
+	fd_install(fd, new_file);
+	return fd;
+
+out_destroy_genpool:
+	if (priv->page_pool)
+		gen_pool_destroy(priv->page_pool);
+out_unmap_dma_buf:
+	dma_buf_unmap_attachment(priv->attachment, priv->sgt, priv->direction);
+out_kfree_pages:
+	vfree(priv->pages);
+out_detach_dma_buf:
+	dma_buf_detach(priv->dmabuf, priv->attachment);
+out_put_dma_buf:
+	dma_buf_put(priv->dmabuf);
+out_put_pci_dev:
+	pci_dev_put(priv->pci_dev);
+out_exit_percpu_ref:
+	percpu_ref_exit(priv->pgmap.ref);
+out_free_priv:
+	kfree(priv);
+out_put_fd:
+	put_unused_fd(fd);
+out_err:
+	return err;
+}
+
+bool is_dma_buf_frags_file(struct file *file)
+{
+	return file->f_op == &dma_buf_frags_fops;
+}
+EXPORT_SYMBOL_GPL(is_dma_buf_frags_file);
+
+bool is_dma_buf_frags_dummy_page(struct page *page)
+{
+	return (IS_ENABLED(CONFIG_DEV_PAGEMAP_OPS) &&
+		is_zone_device_page(page) &&
+		page->pgmap && page->pgmap->ops &&
+		page->pgmap->ops == &dma_buf_frags_pgmap_ops);
+}
+EXPORT_SYMBOL_GPL(is_dma_buf_frags_dummy_page);
 
 #ifdef CONFIG_DEBUG_FS
 static int dma_buf_debug_show(struct seq_file *s, void *unused)

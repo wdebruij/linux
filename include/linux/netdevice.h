@@ -740,11 +740,18 @@ struct netdev_rx_queue {
 	struct xsk_buff_pool            *pool;
 #endif
 	struct pci_dev __rcu		*p2pdma_dev;
+	struct file __rcu		*dmabuf_frags;
 } ____cacheline_aligned_in_smp;
 
 struct page * __netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
 				      int nid, gfp_t gfp_mask,
 				      unsigned int order);
+
+struct page * __netdev_rxq_alloc_page_from_dmabuf_pool(
+		struct netdev_rx_queue *rxq,
+		int nid, gfp_t gfp_mask,
+		unsigned int order);
+
 
 static inline struct page * netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
 						  int nid, gfp_t gfp_mask,
@@ -753,15 +760,18 @@ static inline struct page * netdev_rxq_alloc_page(struct netdev_rx_queue *rxq,
 	/* TODO: static_branch this unlikely p2pdma path */
 	if (unlikely(rcu_access_pointer(rxq->p2pdma_dev)))
 		return __netdev_rxq_alloc_page(rxq, nid, gfp_mask, order);
+	else if (unlikely(rcu_access_pointer(rxq->dmabuf_frags)))
+		return __netdev_rxq_alloc_page_from_dmabuf_pool(rxq, nid, gfp_mask, order);
 
 	return __alloc_pages_node(nid, gfp_mask, order);
 }
 
 static inline void netdev_rxq_free_page(struct page *pg)
 {
-	if (is_pci_p2pdma_page(pg)) {
+	if (is_pci_p2pdma_page(pg) || is_dma_buf_frags_dummy_page(pg)) {
 		/* pci_free_p2pmem */
 		net_info_ratelimited("p2pdma free (skipped)");
+		put_page(pg);
 		return;
 	}
 

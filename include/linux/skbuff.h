@@ -29,7 +29,9 @@
 #include <linux/rcupdate.h>
 #include <linux/hrtimer.h>
 #include <linux/dma-mapping.h>
+#include <linux/dma-buf.h>
 #include <linux/netdev_features.h>
+#include <linux/pci-p2pdma.h>
 #include <linux/sched.h>
 #include <linux/sched/clock.h>
 #include <net/flow_dissector.h>
@@ -454,6 +456,13 @@ enum {
 	 * all frags to avoid possible bad checksum
 	 */
 	SKBFL_SHARED_FRAG = BIT(1),
+
+	/* This indicates that all the fragments in this skb is backed by device
+	 * memory.
+	 * The networking stack should avoid mapping those frags and accessing
+	 * their content
+	 */
+	SKBFL_DEVMEM_FRAG = BIT(2),
 };
 
 #define SKBFL_ZEROCOPY_FRAG	(SKBFL_ZEROCOPY_ENABLE | SKBFL_SHARED_FRAG)
@@ -506,7 +515,7 @@ void msg_zerocopy_callback(struct sk_buff *skb, struct ubuf_info *uarg,
 
 int skb_zerocopy_iter_dgram(struct sk_buff *skb, struct msghdr *msg, int len);
 int skb_zerocopy_iter_stream(struct sock *sk, struct sk_buff *skb,
-			     struct msghdr *msg, int len,
+			     struct iov_iter *iov_iter, int len,
 			     struct ubuf_info *uarg);
 
 /* This data is invariant across clones and lives at
@@ -1451,6 +1460,22 @@ static inline unsigned int skb_end_offset(const struct sk_buff *skb)
 static inline struct skb_shared_hwtstamps *skb_hwtstamps(struct sk_buff *skb)
 {
 	return &skb_shinfo(skb)->hwtstamps;
+}
+
+static inline bool skb_devmem_frag(struct sk_buff *skb) {
+	return skb && skb_shinfo(skb)->flags & SKBFL_DEVMEM_FRAG;
+}
+
+static inline void skb_devmem_frag_set(struct sk_buff *skb) {
+	if (skb && !skb_devmem_frag(skb)) {
+		skb_shinfo(skb)->flags |= SKBFL_DEVMEM_FRAG;
+	}
+}
+
+static inline void skb_devmem_frag_clear(struct sk_buff *skb) {
+	if (skb && skb_devmem_frag(skb)) {
+		skb_shinfo(skb)->flags &= ~SKBFL_DEVMEM_FRAG;
+	}
 }
 
 static inline struct ubuf_info *skb_zcopy(struct sk_buff *skb)
@@ -3100,31 +3125,6 @@ static inline void __skb_frag_unref(skb_frag_t *frag, bool recycle)
 {
 	struct page *page = skb_frag_page(frag);
 
-	/* Do not call put_page on a page from a p2pdma genpool.
-	 *
-	 * This currently is a huge mem leak:
-	 *
-	 * It relies on setsockopt SO_DEVMEM_OFFSET to later release
-	 * the page to the genpool using pci_free_p2pmem_iov.
-	 *
-	 * But that
-	 * 1. only happens for payload pages passed to userspace with
-	 *    cmsg. Not, for instance, for a page backing initial SYN.
-	 *    Those are currently leaked.
-	 * 2. even for payload pages trusts a user process that may
-	 *    exit/crash at any time, or pass a wrong address, or pass
-	 *    the same address multiple times.
-	 * 3. does not refcount readers, assumes exactly one.
-	 *
-	 * Clearly this is ONLY ok for initial best-case benchmarking.
-	 *
-	 * First improvement is to release back to genpool unless a
-	 * previous put_cmsg in tcp_recvmsg expressly marked the page
-	 * as passed to user. That addresses SYN and similar cases.
-	 */
-	if (is_pci_p2pdma_page(page))
-		return;
-
 #ifdef CONFIG_PAGE_POOL
 	if (recycle && page_pool_return_skb_page(page))
 		return;
@@ -3227,8 +3227,22 @@ static inline dma_addr_t skb_frag_dma_map(struct device *dev,
 					  size_t offset, size_t size,
 					  enum dma_data_direction dir)
 {
-	return dma_map_page(dev, skb_frag_page(frag),
-			    skb_frag_off(frag) + offset, size, dir);
+	if (unlikely(is_pci_p2pdma_page(skb_frag_page(frag)))) {
+		struct scatterlist sgl;
+		sgl.page_link = (unsigned long)skb_frag_page(frag);
+		sgl.offset = skb_frag_off(frag) + offset;
+		sgl.length = size;
+		pci_p2pdma_compute_maptype_if_not_cached(skb_frag_page(frag)->pgmap, to_pci_dev(dev));
+		pci_p2pdma_map_sg(dev, &sgl, 1, dir);
+		return sgl.dma_address;
+	} else if (unlikely(is_dma_buf_frags_dummy_page(skb_frag_page(frag)))) {
+		struct page *page = skb_frag_page(frag);
+		dma_addr_t dma_addr = (dma_addr_t)page->zone_device_data;
+		return dma_addr + skb_frag_off(frag) + offset;
+	} else {
+		return dma_map_page(dev, skb_frag_page(frag),
+				    skb_frag_off(frag) + offset, size, dir);
+	}
 }
 
 static inline struct sk_buff *pskb_copy(struct sk_buff *skb,
@@ -3394,6 +3408,8 @@ static inline bool skb_can_coalesce(struct sk_buff *skb, int i,
 				    const struct page *page, int off)
 {
 	if (skb_zcopy(skb))
+		return false;
+	if (skb_devmem_frag(skb))
 		return false;
 	if (i) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i - 1];

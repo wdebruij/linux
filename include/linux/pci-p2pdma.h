@@ -12,6 +12,24 @@
 #define _LINUX_PCI_P2PDMA_H
 
 #include <linux/pci.h>
+#include <linux/uio.h>
+
+struct pci_p2pdma_pagemap {
+	struct dev_pagemap pgmap;
+	struct pci_dev *provider;
+	u64 bus_offset;
+};
+
+
+struct p2pdma_pages_vec {
+	struct iov_iter pages_iter;
+	struct bio_vec *bv;
+	size_t num_pages;
+	size_t size;
+
+	struct pci_p2pdma_pagemap p2p_pgmap;
+	void *private_ptr;
+};
 
 struct block_device;
 struct scatterlist;
@@ -29,6 +47,7 @@ bool pci_has_p2pmem(struct pci_dev *pdev);
 struct pci_dev *pci_p2pmem_find_many(struct device **clients, int num_clients);
 void *pci_alloc_p2pmem(struct pci_dev *pdev, size_t size);
 void pci_free_p2pmem(struct pci_dev *pdev, void *addr, size_t size);
+void pci_free_p2pmem_page(struct page* pg);
 pci_bus_addr_t pci_p2pmem_virt_to_bus(struct pci_dev *pdev, void *addr);
 struct scatterlist *pci_p2pmem_alloc_sgl(struct pci_dev *pdev,
 					 unsigned int *nents, u32 length);
@@ -42,6 +61,8 @@ int pci_p2pdma_enable_store(const char *page, struct pci_dev **p2p_dev,
 			    bool *use_p2pdma);
 ssize_t pci_p2pdma_enable_show(char *page, struct pci_dev *p2p_dev,
 			       bool use_p2pdma);
+void pci_p2pdma_compute_maptype_if_not_cached(struct dev_pagemap *pgmap,
+					      struct pci_dev *client);
 #else /* CONFIG_PCI_P2PDMA */
 static inline int pci_p2pdma_add_resource(struct pci_dev *pdev, int bar,
 		size_t size, u64 offset)
@@ -68,6 +89,9 @@ static inline void *pci_alloc_p2pmem(struct pci_dev *pdev, size_t size)
 }
 static inline void pci_free_p2pmem(struct pci_dev *pdev, void *addr,
 		size_t size)
+{
+}
+static inline void pci_free_p2pmem_page(struct page* pg)
 {
 }
 static inline pci_bus_addr_t pci_p2pmem_virt_to_bus(struct pci_dev *pdev,
@@ -108,6 +132,10 @@ static inline ssize_t pci_p2pdma_enable_show(char *page,
 		struct pci_dev *p2p_dev, bool use_p2pdma)
 {
 	return sprintf(page, "none\n");
+}
+void pci_p2pdma_compute_maptype_if_not_cached(struct dev_pagemap *pgmap,
+					      struct pci_dev *client)
+{
 }
 #endif /* CONFIG_PCI_P2PDMA */
 

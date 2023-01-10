@@ -42,6 +42,8 @@
 #include <linux/if_vlan.h>
 #include <linux/vmalloc.h>
 #include <linux/irq.h>
+#include <linux/pci-p2pdma.h>
+#include <linux/dma-buf.h>
 
 #include <net/ip.h>
 #if IS_ENABLED(CONFIG_IPV6)
@@ -64,11 +66,22 @@ static int mlx4_alloc_page(struct mlx4_en_priv *priv,
 	if (unlikely(!page))
 		return -ENOMEM;
 
-/* TODO: replace dma with p2pdma */
-	dma = dma_map_page(priv->ddev, page, 0, PAGE_SIZE, priv->dma_dir);
-	if (unlikely(dma_mapping_error(priv->ddev, dma))) {
-		__free_page(page);
-		return -ENOMEM;
+	if (is_pci_p2pdma_page(page)) {
+		struct scatterlist sgl;
+		sgl.page_link = (unsigned long)page;
+		sgl.offset = 0;
+		sgl.length = PAGE_SIZE;
+		pci_p2pdma_compute_maptype_if_not_cached(page->pgmap, priv->ddev);
+		pci_p2pdma_map_sg(priv->ddev, &sgl, 1, priv->dma_dir);
+		dma = sgl.dma_address;
+	} else if (is_dma_buf_frags_dummy_page(page)) {
+		dma = (dma_addr_t)page->zone_device_data;
+	} else {
+		dma = dma_map_page(priv->ddev, page, 0, PAGE_SIZE, priv->dma_dir);
+		if (unlikely(dma_mapping_error(priv->ddev, dma))) {
+			__free_page(page);
+			return -ENOMEM;
+		}
 	}
 	frag->page = page;
 	frag->dma = dma;
@@ -100,8 +113,18 @@ static void mlx4_en_free_frag(const struct mlx4_en_priv *priv,
 			      struct mlx4_en_rx_alloc *frag)
 {
 	if (frag->page) {
-		dma_unmap_page(priv->ddev, frag->dma,
-			       PAGE_SIZE, priv->dma_dir);
+		if (is_pci_p2pdma_page(frag->page)) {
+			struct scatterlist sgl;
+			sgl.page_link = (unsigned long)page;
+			sgl.offset = 0;
+			sgl.length = PAGE_SIZE;
+			sgl.dma_address = frag->dma;
+			pci_p2pdma_unmap_sg(priv->ddev, &sgl, 1, priv->dma_dir);
+		} else if (is_dma_buf_frags_dummy_page(frag->page)) {
+			// for dmabuf pages, nothing needs to be done.
+		} else
+			dma_unmap_page(priv->ddev, frag->dma,
+				       PAGE_SIZE, priv->dma_dir);
 		netdev_rxq_free_page(frag->page);
 	}
 	/* We need to clear all fields, otherwise a change of priv->log_rx_info
@@ -458,8 +481,18 @@ void mlx4_en_deactivate_rx_ring(struct mlx4_en_priv *priv,
 	int i;
 
 	for (i = 0; i < ring->page_cache.index; i++) {
-		dma_unmap_page(priv->ddev, ring->page_cache.buf[i].dma,
-			       PAGE_SIZE, priv->dma_dir);
+		if (is_pci_p2pdma_page(ring->page_cache.buf[i].page)) {
+			struct scatterlist sgl;
+			sgl.page_link = (unsigned long)ring->page_cache.buf[i].page;
+			sgl.offset = 0;
+			sgl.length = PAGE_SIZE;
+			sgl.dma_address = ring->page_cache.buf[i].dma;
+			pci_p2pdma_unmap_sg(priv->ddev, &sgl, 1, priv->dma_dir);
+		} else if (is_dma_buf_frags_dummy_page(ring->page_cache.buf[i].page)) {
+			// for dmabuf pages, nothing needs to be done.
+		} else
+			dma_unmap_page(priv->ddev, ring->page_cache.buf[i].dma,
+				       PAGE_SIZE, priv->dma_dir);
 		put_page(ring->page_cache.buf[i].page);
 	}
 	ring->page_cache.index = 0;
@@ -495,6 +528,8 @@ static int mlx4_en_complete_rx_desc(struct mlx4_en_priv *priv,
 
 		__skb_fill_page_desc(skb, nr, page, frags->page_offset,
 				     frag_size);
+		if (is_pci_p2pdma_page(page) || is_dma_buf_frags_dummy_page(page))
+			skb_devmem_frag_set(skb);
 
 		truesize += frag_info->frag_stride;
 		if (frag_info->frag_stride == PAGE_SIZE / 2) {
@@ -513,7 +548,17 @@ static int mlx4_en_complete_rx_desc(struct mlx4_en_priv *priv,
 			release = frags->page_offset + frag_info->frag_size > PAGE_SIZE;
 		}
 		if (release) {
-			dma_unmap_page(priv->ddev, dma, PAGE_SIZE, priv->dma_dir);
+			if (is_pci_p2pdma_page(frag->page)) {
+				struct scatterlist sgl;
+				sgl.page_link = (unsigned long)frag->page;
+				sgl.offset = 0;
+				sgl.length = PAGE_SIZE;
+				sgl.dma_address = dma;
+				pci_p2pdma_unmap_sg(priv->ddev, &sgl, 1, priv->dma_dir);
+			} else if (is_dma_buf_frags_dummy_page(frag->page)) {
+				// for dmabuf pages, nothing needs to be done.
+			} else
+				dma_unmap_page(priv->ddev, dma, PAGE_SIZE, priv->dma_dir);
 			frags->page = NULL;
 		} else {
 			page_ref_inc(page);
